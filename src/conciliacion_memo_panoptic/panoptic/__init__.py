@@ -1,0 +1,1 @@
+"""Automatizacion para Panoptic."""

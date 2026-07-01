@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: conciliacion-memo-panoptic
+Version: 0.1.0
+Summary: Descarga de Panoptic y conciliacion contra estados de cuenta MEMO.
+Requires-Python: >=3.10
+Requires-Dist: openpyxl>=3.1.0
+Requires-Dist: pandas>=2.2.0
+Requires-Dist: playwright>=1.44.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"

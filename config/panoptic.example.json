@@ -1,0 +1,16 @@
+{
+  "start_url": "https://verigon.prgx.com/",
+  "app_base_url": "https://verigon.prgx.com",
+  "download_dir": "data/raw/panoptic",
+  "browser_profile_dir": "%LOCALAPPDATA%/ConciliacionMemoPanoptic/playwright/panoptic-profile-chrome",
+  "login_email": "",
+  "browser_channel": "msedge ",
+  "browser_executable_path": null,
+  "chromium_sandbox": true,
+  "headless": false,
+  "default_timeout_ms": 60000,
+  "download_timeout_ms": 300000,
+  "action_timeout_ms": 8000,
+  "locator_probe_timeout_ms": 1500,
+  "post_click_wait_ms": 300
+}

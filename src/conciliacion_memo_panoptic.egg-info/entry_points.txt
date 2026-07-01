@@ -1,0 +1,2 @@
+[console_scripts]
+cmp = conciliacion_memo_panoptic.cli:main

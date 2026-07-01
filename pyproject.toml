@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conciliacion-memo-panoptic"
+version = "0.1.0"
+description = "Descarga de Panoptic y conciliacion contra estados de cuenta MEMO."
+requires-python = ">=3.10"
+dependencies = [
+    "openpyxl>=3.1.0",
+    "pandas>=2.2.0",
+    "playwright>=1.44.0",
+    "customtkinter>=5.2.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+cmp     = "conciliacion_memo_panoptic.cli:main"
+cmp-gui = "conciliacion_memo_panoptic.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

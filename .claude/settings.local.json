@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(ls \"C:/Users/opined01/.claude/projects/x--Soriana-00---AUDITORIA-2020---2024-00---Auditores-Oscar-Proyectos-Python-Conciliacion-Memo-Panoptic/memory/\" 2>/dev/null || echo \"vacío\")",
+      "Read(//c/Users/opined01/.claude/projects/x--Soriana-00---AUDITORIA-2020---2024-00---Auditores-Oscar-Proyectos-Python-Conciliacion-Memo-Panoptic/memory/**)",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.conciliation.processing import reconcile_with_memo, reconcile_all_memos, MemoResult; print\\('OK'\\)\")",
+      "Bash(python -m conciliacion_memo_panoptic reconcile-all --help)",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.cli import build_parser; p = build_parser\\(\\); p.parse_args\\(['reconcile-all', '--help']\\)\")",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.panoptic.navigation import PanopticNavigator; print\\('OK'\\)\")",
+      "Read(//x/Soriana/00 - AUDITORIA 2020 - 2024/Cargos/Memo_030 varios/**)",
+      "Read(//x/Soriana/00 - AUDITORIA 2020 - 2024/Cargos/**)",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.conciliation.processing import reconcile_all_memos, _discover_memo_entries; from pathlib import Path; entries = _discover_memo_entries\\(Path\\('x:/Soriana/00 - AUDITORIA 2020 - 2024/Cargos'\\)\\); print\\(f'Total memos encontrados: {len\\(entries\\)}'\\); print\\('Primeros 5:', [e[0] for e in entries[:5]]\\); print\\('Rango 40-56:', [e[0] for e in entries if 40 <= int\\(e[0][1:]\\) <= 56]\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.conciliation.processing import reconcile_all_memos; print\\('OK'\\)\")",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.conciliation.processing import consolidate_results; print\\('OK'\\)\")",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.conciliation.processing import reconcile_all_memos, consolidate_results; print\\('OK'\\)\")",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.conciliation.formatting import write_sheet, style_workbook, DEFAULT_LOGO; print\\('formatting OK'\\); print\\('Logo existe:', DEFAULT_LOGO.exists\\(\\), '->', DEFAULT_LOGO\\)\")",
+      "Bash(python -c \"from src.conciliacion_memo_panoptic.conciliation.processing import reconcile_all_memos, consolidate_results; print\\('processing OK'\\)\")",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(.venv/Scripts/python.exe -c \"from src.conciliacion_memo_panoptic.conciliation.processing import _p1_filter_mask, _paso1_asignar_memo, _cruce_resumen, _paso4_duplicados, _reconcile_memo_from_df, reconcile_all_memos, consolidate_results; print\\('OK'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"from src.conciliacion_memo_panoptic.conciliation.processing import _reconcile_memo_from_df; print\\('OK'\\)\")",
+      "Bash(ls \"x:/Soriana/00 - AUDITORIA 2020 - 2024/FOLIOS COMPENSATORIOS/\")",
+      "Read(//x/Soriana/00 - AUDITORIA 2020 - 2024/FOLIOS COMPENSATORIOS/**)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import customtkinter; import PIL; print\\('customtkinter', customtkinter.__version__\\); print\\('Pillow', PIL.__version__\\)\")",
+      "Bash(python -c \"from conciliacion_memo_panoptic.gui import ConciliacionApp; print\\('GUI importado OK'\\)\")",
+      "Bash(python -c \"from conciliacion_memo_panoptic.gui import ConciliacionApp; print\\('OK'\\)\")",
+      "Bash(python -c \"from conciliacion_memo_panoptic.gui import ConciliacionApp; from conciliacion_memo_panoptic.settings import PanopticSettings; s = PanopticSettings\\(\\); print\\(f'probe={s.locator_probe_timeout_ms}ms  post_click={s.post_click_wait_ms}ms'\\)\")",
+      "Bash(python -c \"from conciliacion_memo_panoptic.gui import ConciliacionApp; from conciliacion_memo_panoptic.panoptic.downloader import download_xlsx; print\\('OK'\\)\")",
+      "Bash('x:/Soriana/00 - AUDITORIA 2020 - 2024/00 - Auditores/Oscar/Proyectos Python/Conciliacion_Memo_Panoptic/.venv/Scripts/python.exe' -c ' *)",
+      "Bash(\"x:/Soriana/00 - AUDITORIA 2020 - 2024/00 - Auditores/Oscar/Proyectos Python/Conciliacion_Memo_Panoptic/.venv/Scripts/pip.exe\" show pyinstaller)",
+      "Bash(python -c \"import zipfile; z=zipfile.ZipFile\\('dist/Conciliacion_PRGX_distribucion.zip'\\); print\\('\\\\n'.join\\(z.namelist\\(\\)[:40]\\)\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import customtkinter; import pathlib; p = pathlib.Path\\(customtkinter.__file__\\).parent; print\\(p\\); import os; total = sum\\(1 for _ in p.rglob\\('*'\\)\\); print\\(f'{total} archivos en customtkinter'\\)\")",
+      "Bash(.venv/Scripts/python.exe -m PyInstaller \"Conciliacion PRGX.spec\" --noconfirm)",
+      "Bash(.venv/Scripts/python.exe -)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_processing.py -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_processing.py::TestPaso1ReejecutarDiferencias::test_stage_posting_con_status_invoice_ready_no_pasa -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_processing.py::TestPaso1ReejecutarDiferencias::test_stage_posting_con_status_invoice_ready_no_pasa -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_processing.py -v --tb=short)"
+    ]
+  }
+}
