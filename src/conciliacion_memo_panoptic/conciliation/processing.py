@@ -22,6 +22,7 @@ _P1_EXCLUDE_CAUSE   = "Limitation in a systems functionality"
 _P1_VALID_STAGES    = {"Posting", "Vendor"}
 _P1_VALID_STATUSES  = {"In Review", "Posted"}
 _AMOUNT_TOLERANCE   = 1.0
+_PAN_EXCLUDE_YEAR   = 2025  # Auditoría cubre 2020-2024; excluir año en curso
 
 _P4_KEY_COLS = [
     "Num Proveedor", "Año", "Concepto", "Num Categoria",
@@ -34,7 +35,15 @@ _INCON_MONTOS_COLS = [
     "Vendor number", "Vendor name", "Assigned to",
     "Sum Net claim amount (Panoptic)", "Sum Tax amount (Panoptic)", "Gross claim amount (Panoptic)",
     "Monto antes de impuestos (MEMO)", "IVA (MEMO)", "IEPS (MEMO)", "Monto Total (MEMO)",
-    "Amount Difference", "Vendor Status", "Amount Status",
+    "Amount Difference", "Net Amount Difference", "Vendor Status", "Amount Status",
+]
+_DIFFS_COLS = [
+    "Memo", "Vendor number", "Vendor name", "Claim number",
+    "Financial year of origin", "Posting reference number",
+    "Net claim amount", "Total tax amount", "Gross claim amount",
+    "Claim cause description", "Stage", "Status", "Assigned to",
+    "Amount Difference (MEMO)", "Net Amount Difference (MEMO)",
+    "Motivo detección",
 ]
 _DEFAULT_TEMPLATE_PATH = PROJECT_ROOT / "data" / "templates" / "Claim_Bulk_Update_Template.xlsx"
 
@@ -86,6 +95,7 @@ def _load_panoptic(path: Path) -> pd.DataFrame:
         df["Financial year of origin"] = pd.to_numeric(
             df["Financial year of origin"], errors="coerce"
         ).astype("Int64")
+        df = df[df["Financial year of origin"] != _PAN_EXCLUDE_YEAR].reset_index(drop=True)
     return df
 
 
@@ -473,10 +483,141 @@ def _cruce_resumen(df_pan_memo: pd.DataFrame, df_memo_pf: pd.DataFrame) -> pd.Da
     cruce["Amount Difference"] = (
         cruce["Gross claim amount (Panoptic)"] - cruce["Monto Total (MEMO)"]
     )
+    cruce["Net Amount Difference"] = (
+        cruce["Sum Net claim amount (Panoptic)"].fillna(0.0)
+        - cruce["Monto antes de impuestos (MEMO)"].fillna(0.0)
+    )
     cruce["Amount Status"] = np.where(
         cruce["Amount Difference"].abs() <= _AMOUNT_TOLERANCE, "OK", "Mismatch"
     )
     return cruce.drop(columns=["_merge"])
+
+
+# ---------------------------------------------------------------------------
+# Paso 3b — Identificar claims que causan la diferencia de monto
+# ---------------------------------------------------------------------------
+
+def _identificar_diferencias_x_monto(
+    df_pan_memo: pd.DataFrame,
+    df_memo_ca: pd.DataFrame,
+    incon_montos: pd.DataFrame,
+    memo_id: str,
+) -> pd.DataFrame:
+    """Para cada vendor con diferencia de monto (Incons Montos), identifica
+    los claims específicos de Panoptic que generan esa diferencia.
+
+    Estrategias de detección (acumulativas — un claim puede activar varias):
+    1. Año del claim no existe en MEMO para ese vendor.
+    2. Concepto del claim no existe en MEMO para ese vendor/año (cuando el año sí existe).
+    3. Monto bruto del claim ≈ Amount Difference del vendor (±1 peso).
+    4. Monto neto del claim ≈ Net Amount Difference del vendor (±1 peso).
+
+    Los claims detectados se anotan con la columna 'Motivo detección' indicando
+    qué estrategias los identificaron.
+    """
+    if incon_montos.empty or df_pan_memo.empty:
+        return pd.DataFrame(columns=_DIFFS_COLS)
+
+    year_col = "Financial year of origin"
+
+    # Excluir "Limitation" — consistente con el cálculo de montos en _cruce_resumen
+    pan_base = df_pan_memo.copy()
+    if "Claim cause description" in pan_base.columns:
+        pan_base = pan_base[
+            pan_base["Claim cause description"].fillna("").str.strip() != _P1_EXCLUDE_CAUSE
+        ]
+    pan_base = pan_base.copy()
+    pan_base["Gross claim amount"] = (
+        pan_base["Net claim amount"].fillna(0.0)
+        + pan_base["Total tax amount"].fillna(0.0)
+    )
+
+    has_year_col    = year_col in pan_base.columns
+    has_concepto    = "Concepto" in df_memo_ca.columns and "Claim cause description" in pan_base.columns
+
+    rows: list[dict] = []
+
+    for _, incon_row in incon_montos.iterrows():
+        vendor      = str(incon_row["Vendor number"]).strip()
+        amount_diff = float(incon_row.get("Amount Difference", 0) or 0)
+        net_diff    = float(incon_row.get("Net Amount Difference", 0) or 0)
+        vendor_name = str(incon_row.get("Vendor name", "") or "")
+
+        # Claims de este vendor en el memo actual
+        pan_v = pan_base[_normalize_vendor(pan_base["Vendor number"]) == vendor]
+        if pan_v.empty:
+            continue
+
+        # Años y (año, concepto) disponibles en MEMO para este vendor
+        memo_v = df_memo_ca[df_memo_ca["Num Proveedor"] == vendor]
+        memo_years: set[int] = (
+            set(memo_v["Año"].dropna().astype(int).tolist())
+            if not memo_v.empty else set()
+        )
+        memo_concepts_by_year: set[tuple] = set()
+        if has_concepto and not memo_v.empty:
+            memo_concepts_by_year = {
+                (int(r["Año"]), str(r["Concepto"]).strip().upper())
+                for _, r in memo_v.dropna(subset=["Año"]).iterrows()
+            }
+
+        motivos: dict[object, list[str]] = {}
+
+        for idx, claim in pan_v.iterrows():
+            found: list[str] = []
+
+            claim_year    = claim.get(year_col) if has_year_col else None
+            claim_concept = str(claim.get("Claim cause description", "") or "").strip().upper()
+            claim_gross   = float(claim["Gross claim amount"])
+            claim_net     = float(claim.get("Net claim amount", 0) or 0)
+
+            # Estrategia 1 — año no existe en MEMO
+            if has_year_col and pd.notna(claim_year) and int(claim_year) not in memo_years:
+                found.append(f"Año {int(claim_year)} no existe en MEMO")
+            # Estrategia 2 — concepto no existe en MEMO para ese año (solo si el año sí existe)
+            elif (
+                has_concepto and has_year_col
+                and pd.notna(claim_year)
+                and (int(claim_year), claim_concept) not in memo_concepts_by_year
+            ):
+                found.append(f"Concepto no existe en MEMO para año {int(claim_year)}")
+
+            # Estrategia 3 — monto bruto ≈ diferencia total (solo si la diferencia es significativa)
+            if abs(amount_diff) > _AMOUNT_TOLERANCE and abs(claim_gross - abs(amount_diff)) <= _AMOUNT_TOLERANCE:
+                found.append(f"Monto bruto ≈ diferencia ({amount_diff:+.2f})")
+
+            # Estrategia 4 — monto neto ≈ diferencia neta
+            if abs(net_diff) > _AMOUNT_TOLERANCE and abs(claim_net - abs(net_diff)) <= _AMOUNT_TOLERANCE:
+                found.append(f"Monto neto ≈ dif. neta ({net_diff:+.2f})")
+
+            if found:
+                motivos[idx] = found
+
+        for idx, motivo_list in motivos.items():
+            claim = pan_v.loc[idx]
+            rows.append({
+                "Memo":                         memo_id,
+                "Vendor number":                vendor,
+                "Vendor name":                  vendor_name,
+                "Claim number":                 claim.get("Claim number", ""),
+                "Financial year of origin":     claim.get(year_col) if has_year_col else None,
+                "Posting reference number":     claim.get("Posting reference number", ""),
+                "Net claim amount":             float(claim.get("Net claim amount", 0) or 0),
+                "Total tax amount":             float(claim.get("Total tax amount", 0) or 0),
+                "Gross claim amount":           float(claim["Gross claim amount"]),
+                "Claim cause description":      claim.get("Claim cause description", ""),
+                "Stage":                        claim.get("Stage", ""),
+                "Status":                       claim.get("Status", ""),
+                "Assigned to":                  claim.get("Assigned to", ""),
+                "Amount Difference (MEMO)":     amount_diff,
+                "Net Amount Difference (MEMO)": net_diff,
+                "Motivo detección":             " | ".join(motivo_list),
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=_DIFFS_COLS)
+
+    return pd.DataFrame(rows, columns=_DIFFS_COLS).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +797,11 @@ def _reconcile_memo_from_df(
         [c for c in _INCON_MONTOS_COLS if c in incon_montos.columns]
     ]
 
+    # P3b — Claims que generan la diferencia de monto
+    df_incon_diffs = _identificar_diferencias_x_monto(
+        df_pan_memo, df_memo_ca, incon_montos, memo_id
+    )
+
     # P4 — Duplicados en MEMO
     cruce_detalle, incon_concepto_ano = _paso4_duplicados(df_memo_ca)
 
@@ -676,6 +822,7 @@ def _reconcile_memo_from_df(
         write_sheet(writer, incon_proveedores,  "Incons Proveedores")
         write_sheet(writer, _dupl_sheet,        "Incons DuplicadosxMemo")
         write_sheet(writer, incon_montos,       "Incons Montos")
+        write_sheet(writer, df_incon_diffs,     "Incons DiferenciasXMonto")
         write_sheet(writer, incon_concepto_ano, "Incons Concepto-Año")
         write_sheet(writer, cruce,              "Cruce Resumen")
         write_sheet(writer, cruce_detalle,      "Cruce Detalle")
@@ -690,7 +837,7 @@ def _reconcile_memo_from_df(
 
 def process_panoptic_grouping(input_path: Path, output_dir: Path) -> Path:
     """Genera resumen agrupado por proveedor desde un XLSX de Panoptic."""
-    df = pd.read_excel(input_path)
+    df = _load_panoptic(input_path)
     _ensure_tax_column(df)
 
     summary = df.groupby(["Vendor number", "Vendor name"], as_index=False)[
@@ -907,6 +1054,7 @@ def consolidate_results(output_dir: Path, consolidated_path: Path | None = None)
     all_incons_montos:   list[pd.DataFrame] = []
     all_incons_conc:     list[pd.DataFrame] = []
     dupl_x_memo_df:      pd.DataFrame = pd.DataFrame()
+    all_incons_diffs:    list[pd.DataFrame] = []
 
     for path in archivos:
         memo_match = re.search(r"conciliacion_(M\d+)", path.stem)
@@ -935,6 +1083,10 @@ def consolidate_results(output_dir: Path, consolidated_path: Path | None = None)
                 dupl_x_memo_df = pd.read_excel(
                     xl, sheet_name="Incons DuplicadosxMemo", header=HEADER_ROWS
                 )
+            d_diffs = _read("Incons DiferenciasXMonto")
+            # "Memo" ya viene como columna en _DIFFS_COLS — no usar _tag
+            if len(d_diffs) > 0:
+                all_incons_diffs.append(d_diffs)
         except Exception as exc:
             resumen_rows.append({"Memo": mid, "Estado": f"Error al leer: {exc}"})
             continue
@@ -1000,6 +1152,7 @@ def consolidate_results(output_dir: Path, consolidated_path: Path | None = None)
         write_sheet(writer, _concat(all_incons_prov),     "Incons Proveedores")
         write_sheet(writer, dupl_x_memo_df,               "Incons DuplicadosxMemo")
         write_sheet(writer, _concat(all_incons_montos),   "Incons Montos")
+        write_sheet(writer, _concat(all_incons_diffs),    "Incons DiferenciasXMonto")
         write_sheet(writer, _concat(all_incons_conc),     "Incons Concepto-Año")
         style_workbook(writer.book)
 

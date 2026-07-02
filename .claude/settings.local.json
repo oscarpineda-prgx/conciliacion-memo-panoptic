@@ -39,7 +39,9 @@
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_processing.py::TestPaso1ReejecutarDiferencias::test_stage_posting_con_status_invoice_ready_no_pasa -v --tb=short)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_processing.py -v --tb=short)",
       "Bash(.venv\\\\Scripts\\\\python.exe -m pytest tests/ -v --tb=short)",
-      "Bash(python -m pytest tests/ -v --tb=short)"
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(python -m pytest tests/test_processing.py -v --tb=short)",
+      "Bash(python -m PyInstaller \"Conciliacion PRGX.spec\" --noconfirm)"
     ]
   }
 }

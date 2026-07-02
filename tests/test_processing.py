@@ -17,6 +17,7 @@ import pytest
 
 from conciliacion_memo_panoptic.conciliation.processing import (
     _cruce_resumen,
+    _identificar_diferencias_x_monto,
     _p1_filter_mask,
     _paso1_asignar_memo,
     _paso1_reejecutar_diferencias,
@@ -505,3 +506,160 @@ class TestPaso4Duplicados:
         df = pd.DataFrame([_memo_ca(), _memo_ca(), _memo_ca()])
         _, incon = _paso4_duplicados(df)
         assert incon.iloc[0]["Veces en MEMO"] == 3
+
+
+# ---------------------------------------------------------------------------
+# _identificar_diferencias_x_monto
+# ---------------------------------------------------------------------------
+
+def _df_pan_memo(*rows) -> pd.DataFrame:
+    """DataFrame de Panoptic ya filtrado por memo_id (simula df_pan_memo)."""
+    return pd.DataFrame(list(rows))
+
+
+def _incon_montos_row(**overrides) -> dict:
+    row = {
+        "Vendor number":              "1001",
+        "Vendor name":                "Proveedor Test SA",
+        "Amount Difference":          0.0,
+        "Net Amount Difference":      0.0,
+    }
+    row.update(overrides)
+    return row
+
+
+class TestIdentificarDiferenciasXMonto:
+
+    def test_anio_no_existe_en_memo_detectado(self):
+        # Panoptic tiene año 2024, MEMO solo tiene año 2023 → estrategia 1
+        pan = _df_pan_memo(_pan(**{
+            "Financial year of origin": 2024,
+            "Posting reference number": "M049",
+        }))
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        incon = pd.DataFrame([_incon_montos_row()])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
+        assert len(result) == 1
+        assert "2024 no existe en MEMO" in result.iloc[0]["Motivo detección"]
+
+    def test_concepto_no_existe_para_ese_anio(self):
+        # Año 2023 existe en MEMO pero el concepto "DIFERENTE" no
+        pan = _df_pan_memo(_pan(**{
+            "Financial year of origin": 2023,
+            "Claim cause description":  "CONCEPTO DIFERENTE",
+            "Posting reference number": "M049",
+        }))
+        memo_ca = pd.DataFrame([_memo_ca(**{
+            "Año": 2023, "Concepto": "MERMA DE ORIGEN",
+        })])
+        incon = pd.DataFrame([_incon_montos_row()])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
+        assert len(result) == 1
+        assert "Concepto no existe en MEMO" in result.iloc[0]["Motivo detección"]
+
+    def test_monto_bruto_coincide_con_diferencia(self):
+        # Claim gross = 116, Amount Difference = 116 → estrategia 3
+        pan = _df_pan_memo(_pan(**{
+            "Net claim amount": 100.0, "Total tax amount": 16.0,
+            "Financial year of origin": 2023,
+            "Posting reference number": "M049",
+        }))
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        incon = pd.DataFrame([_incon_montos_row(**{"Amount Difference": 116.0})])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
+        assert any("Monto bruto" in r for r in result["Motivo detección"].values)
+
+    def test_monto_neto_coincide_con_diferencia_neta(self):
+        # Claim net = 100, Net Amount Difference = 100 → estrategia 4
+        pan = _df_pan_memo(_pan(**{
+            "Net claim amount": 100.0, "Total tax amount": 16.0,
+            "Financial year of origin": 2023,
+            "Posting reference number": "M049",
+        }))
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        incon = pd.DataFrame([_incon_montos_row(**{"Net Amount Difference": 100.0})])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
+        assert any("Monto neto" in r for r in result["Motivo detección"].values)
+
+    def test_sin_diferencias_retorna_vacio(self):
+        # Claim año = 2023, MEMO tiene año 2023 y mismo concepto, diffs = 0 → nada detectado
+        pan = _df_pan_memo(_pan(**{
+            "Financial year of origin": 2023,
+            "Claim cause description":  "MERMA DE ORIGEN",
+            "Net claim amount": 100.0, "Total tax amount": 16.0,
+            "Posting reference number": "M049",
+        }))
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023, "Concepto": "MERMA DE ORIGEN"})])
+        incon = pd.DataFrame([_incon_montos_row(**{
+            "Amount Difference": 0.0, "Net Amount Difference": 0.0,
+        })])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
+        assert len(result) == 0
+
+    def test_incon_montos_vacio_retorna_vacio(self):
+        pan = _df_pan_memo(_pan())
+        memo_ca = pd.DataFrame([_memo_ca()])
+        incon = pd.DataFrame(columns=["Vendor number", "Vendor name",
+                                       "Amount Difference", "Net Amount Difference"])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
+        assert len(result) == 0
+
+    def test_columnas_de_salida_correctas(self):
+        pan = _df_pan_memo(_pan(**{
+            "Financial year of origin": 2024,
+            "Posting reference number": "M049",
+        }))
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        incon = pd.DataFrame([_incon_montos_row()])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
+        for col in ["Memo", "Vendor number", "Claim number", "Motivo detección",
+                    "Amount Difference (MEMO)", "Net Amount Difference (MEMO)"]:
+            assert col in result.columns
+
+
+# ---------------------------------------------------------------------------
+# _load_panoptic — filtro de año 2025
+# ---------------------------------------------------------------------------
+
+import tempfile
+from pathlib import Path
+
+from conciliacion_memo_panoptic.conciliation.processing import _load_panoptic
+
+
+def _make_pan_xlsx(rows: list[dict]) -> Path:
+    """Escribe filas en un Excel temporal y devuelve su path."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+    tmp.close()
+    pd.DataFrame(rows).to_excel(tmp.name, index=False)
+    return Path(tmp.name)
+
+
+class TestLoadPanopticFiltroAnio:
+
+    def test_excluye_filas_con_anio_2025(self):
+        path = _make_pan_xlsx([
+            _pan(**{"Financial year of origin": 2023}),
+            _pan(**{"Financial year of origin": 2025}),  # debe quedar fuera
+            _pan(**{"Financial year of origin": 2024}),
+        ])
+        df = _load_panoptic(path)
+        assert 2025 not in df["Financial year of origin"].values
+        assert len(df) == 2
+
+    def test_conserva_anios_distintos_de_2025(self):
+        path = _make_pan_xlsx([
+            _pan(**{"Financial year of origin": 2020}),
+            _pan(**{"Financial year of origin": 2021}),
+            _pan(**{"Financial year of origin": 2022}),
+        ])
+        df = _load_panoptic(path)
+        assert len(df) == 3
+
+    def test_archivo_solo_con_2025_queda_vacio(self):
+        path = _make_pan_xlsx([
+            _pan(**{"Financial year of origin": 2025}),
+            _pan(**{"Financial year of origin": 2025}),
+        ])
+        df = _load_panoptic(path)
+        assert len(df) == 0
