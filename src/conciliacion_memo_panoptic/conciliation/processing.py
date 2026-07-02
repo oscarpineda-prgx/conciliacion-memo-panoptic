@@ -504,6 +504,45 @@ def _paso4_duplicados(df_memo_ca: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
 
 
 # ---------------------------------------------------------------------------
+# Paso 2b — Proveedores duplicados en múltiples memos
+# ---------------------------------------------------------------------------
+
+def _compute_duplicados_x_memo(
+    memo_vendor_sets: dict[str, set[str]],
+    vendor_names: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Detecta proveedores que aparecen en más de un MEMO.
+
+    Devuelve DataFrame con columnas:
+    Vendor number, Vendor name, Memos (ej. M049-M051-M054), Cantidad de Memos.
+    """
+    vendor_to_memos: dict[str, list[str]] = {}
+    for memo_id, vendors in memo_vendor_sets.items():
+        for vendor in vendors:
+            vendor_to_memos.setdefault(vendor, []).append(memo_id)
+
+    rows = []
+    for vendor, memos in vendor_to_memos.items():
+        if len(memos) > 1:
+            memos_sorted = sorted(memos)
+            rows.append({
+                "Vendor number":     vendor,
+                "Vendor name":       (vendor_names or {}).get(vendor, ""),
+                "Memos":             "-".join(memos_sorted),
+                "Cantidad de Memos": len(memos_sorted),
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=["Vendor number", "Vendor name", "Memos", "Cantidad de Memos"])
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values("Vendor number")
+        .reset_index(drop=True)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Generación de plantilla de bulk update para Panoptic
 # ---------------------------------------------------------------------------
 
@@ -557,6 +596,7 @@ def _reconcile_memo_from_df(
     *,
     claims_accumulator: list[pd.DataFrame] | None = None,
     memo_vendor_sets: dict[str, set[str]] | None = None,
+    df_duplicados_x_memo: pd.DataFrame | None = None,
 ) -> Path:
     """Ejecuta los 4 pasos de conciliación para un memo.
 
@@ -624,11 +664,17 @@ def _reconcile_memo_from_df(
     memos_dir.mkdir(parents=True, exist_ok=True)
     output_path = memos_dir / f"conciliacion_{memo_id}.xlsx"
 
+    _dupl_sheet = (
+        df_duplicados_x_memo
+        if df_duplicados_x_memo is not None
+        else pd.DataFrame(columns=["Vendor number", "Vendor name", "Memos", "Cantidad de Memos"])
+    )
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_sheet(writer, df_p1_actualizados, "P1 Actualizados")
         write_sheet(writer, df_p1_diferencias,  "P1 Diferencias")
         write_sheet(writer, df_p1_reejecucion,  "P1 Reejecución")
         write_sheet(writer, incon_proveedores,  "Incons Proveedores")
+        write_sheet(writer, _dupl_sheet,        "Incons DuplicadosxMemo")
         write_sheet(writer, incon_montos,       "Incons Montos")
         write_sheet(writer, incon_concepto_ano, "Incons Concepto-Año")
         write_sheet(writer, cruce,              "Cruce Resumen")
@@ -740,15 +786,25 @@ def reconcile_all_memos(
             return True
         entries = [(mid, p) for mid, p in entries if _in_range(mid)]
 
-    # Pre-cargar vendor sets de todos los memos para la validación cruzada de P1.
-    # Permite detectar si un claim con memo diferente asignado realmente pertenece a ese memo.
+    # Pre-cargar vendor sets de todos los memos para la validación cruzada de P1
+    # y para detectar proveedores duplicados entre memos.
     memo_vendor_sets: dict[str, set[str]] = {}
+    _vendor_names: dict[str, str] = {}
     for mid, mpath in entries:
         try:
             df_pf = _load_memo_prov_fase(mpath)
             memo_vendor_sets[mid] = set(df_pf["Num Proveedor"].astype(str))
+            if "Proveedor" in df_pf.columns:
+                _vendor_names.update(
+                    zip(
+                        df_pf["Num Proveedor"].astype(str),
+                        df_pf["Proveedor"].astype(str),
+                    )
+                )
         except Exception:
             memo_vendor_sets[mid] = set()
+
+    df_duplicados_x_memo = _compute_duplicados_x_memo(memo_vendor_sets, _vendor_names)
 
     results: list[MemoResult] = []
     claims_accumulator: list[pd.DataFrame] = []
@@ -762,6 +818,7 @@ def reconcile_all_memos(
                 df_pan, memo_path, memo_id, output_dir,
                 claims_accumulator=claims_accumulator,
                 memo_vendor_sets=memo_vendor_sets,
+                df_duplicados_x_memo=df_duplicados_x_memo,
             )
         except Exception as exc:
             result.error = str(exc)
@@ -849,6 +906,7 @@ def consolidate_results(output_dir: Path, consolidated_path: Path | None = None)
     all_incons_prov:     list[pd.DataFrame] = []
     all_incons_montos:   list[pd.DataFrame] = []
     all_incons_conc:     list[pd.DataFrame] = []
+    dupl_x_memo_df:      pd.DataFrame = pd.DataFrame()
 
     for path in archivos:
         memo_match = re.search(r"conciliacion_(M\d+)", path.stem)
@@ -872,6 +930,11 @@ def consolidate_results(output_dir: Path, consolidated_path: Path | None = None)
             d_montos      = _read("Incons Montos")
             d_conc        = _read("Incons Concepto-Año")
             d_cruce       = _read("Cruce Resumen")
+            # DuplicadosxMemo es igual en todos los archivos: tomar del primero disponible
+            if dupl_x_memo_df.empty and "Incons DuplicadosxMemo" in sheets:
+                dupl_x_memo_df = pd.read_excel(
+                    xl, sheet_name="Incons DuplicadosxMemo", header=HEADER_ROWS
+                )
         except Exception as exc:
             resumen_rows.append({"Memo": mid, "Estado": f"Error al leer: {exc}"})
             continue
@@ -935,6 +998,7 @@ def consolidate_results(output_dir: Path, consolidated_path: Path | None = None)
         write_sheet(writer, _concat(all_p1_diferencias),  "P1 Diferencias")
         write_sheet(writer, _concat(all_p1_reejecucion),  "P1 Reejecución")
         write_sheet(writer, _concat(all_incons_prov),     "Incons Proveedores")
+        write_sheet(writer, dupl_x_memo_df,               "Incons DuplicadosxMemo")
         write_sheet(writer, _concat(all_incons_montos),   "Incons Montos")
         write_sheet(writer, _concat(all_incons_conc),     "Incons Concepto-Año")
         style_workbook(writer.book)
