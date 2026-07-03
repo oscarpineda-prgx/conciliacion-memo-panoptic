@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from conciliacion_memo_panoptic.conciliation.processing import (
+    _agregar_periodos_incon_montos,
     _cruce_resumen,
     _identificar_diferencias_x_monto,
     _p1_filter_mask,
@@ -509,6 +510,87 @@ class TestPaso4Duplicados:
 
 
 # ---------------------------------------------------------------------------
+# _agregar_periodos_incon_montos
+# ---------------------------------------------------------------------------
+
+class TestAgregarPeriodosInconMontos:
+
+    def _incon_row(self, vendor="1001", **kwargs) -> dict:
+        row = {"Vendor number": vendor, "Vendor name": "Test SA"}
+        row.update(kwargs)
+        return row
+
+    def test_periodos_panoptic_correctos(self):
+        pan = _df_pan_memo(
+            _pan(**{"Financial year of origin": 2022}),
+            _pan(**{"Financial year of origin": 2023}),
+        )
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        incon = pd.DataFrame([self._incon_row()])
+        result = _agregar_periodos_incon_montos(incon, pan, memo_ca)
+        assert result.iloc[0]["Periodos Panoptic"] == "2022 - 2023"
+
+    def test_periodos_memo_correctos(self):
+        pan = _df_pan_memo(_pan(**{"Financial year of origin": 2023}))
+        memo_ca = pd.DataFrame([
+            _memo_ca(**{"Año": 2021}),
+            _memo_ca(**{"Año": 2022}),
+        ])
+        incon = pd.DataFrame([self._incon_row()])
+        result = _agregar_periodos_incon_montos(incon, pan, memo_ca)
+        assert result.iloc[0]["Periodos Memo"] == "2021 - 2022"
+
+    def test_periodos_diferencia_detecta_anio_extra_en_panoptic(self):
+        pan = _df_pan_memo(
+            _pan(**{"Financial year of origin": 2022}),
+            _pan(**{"Financial year of origin": 2024}),
+        )
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2022})])
+        incon = pd.DataFrame([self._incon_row()])
+        result = _agregar_periodos_incon_montos(incon, pan, memo_ca)
+        assert "2024" in result.iloc[0]["Periodos Diferencia"]
+        assert "2022" not in result.iloc[0]["Periodos Diferencia"]
+
+    def test_periodos_diferencia_detecta_anio_solo_en_memo(self):
+        pan = _df_pan_memo(_pan(**{"Financial year of origin": 2023}))
+        memo_ca = pd.DataFrame([
+            _memo_ca(**{"Año": 2023}),
+            _memo_ca(**{"Num Proveedor": "1001", "Año": 2020}),
+        ])
+        incon = pd.DataFrame([self._incon_row()])
+        result = _agregar_periodos_incon_montos(incon, pan, memo_ca)
+        assert "2020" in result.iloc[0]["Periodos Diferencia"]
+
+    def test_sin_diferencia_cuando_mismos_anios(self):
+        pan = _df_pan_memo(_pan(**{"Financial year of origin": 2023}))
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        incon = pd.DataFrame([self._incon_row()])
+        result = _agregar_periodos_incon_montos(incon, pan, memo_ca)
+        assert result.iloc[0]["Periodos Diferencia"] == ""
+
+    def test_incon_vacio_retorna_columnas_vacias(self):
+        pan = _df_pan_memo(_pan())
+        memo_ca = pd.DataFrame([_memo_ca()])
+        incon = pd.DataFrame(columns=["Vendor number"])
+        result = _agregar_periodos_incon_montos(incon, pan, memo_ca)
+        assert len(result) == 0
+        assert "Periodos Panoptic" in result.columns
+        assert "Periodos Memo" in result.columns
+        assert "Periodos Diferencia" in result.columns
+
+    def test_orden_de_anios_es_ascendente(self):
+        pan = _df_pan_memo(
+            _pan(**{"Financial year of origin": 2024}),
+            _pan(**{"Financial year of origin": 2021}),
+            _pan(**{"Financial year of origin": 2022}),
+        )
+        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        incon = pd.DataFrame([self._incon_row()])
+        result = _agregar_periodos_incon_montos(incon, pan, memo_ca)
+        assert result.iloc[0]["Periodos Panoptic"] == "2021 - 2022 - 2024"
+
+
+# ---------------------------------------------------------------------------
 # _identificar_diferencias_x_monto
 # ---------------------------------------------------------------------------
 
@@ -617,49 +699,3 @@ class TestIdentificarDiferenciasXMonto:
             assert col in result.columns
 
 
-# ---------------------------------------------------------------------------
-# _load_panoptic — filtro de año 2025
-# ---------------------------------------------------------------------------
-
-import tempfile
-from pathlib import Path
-
-from conciliacion_memo_panoptic.conciliation.processing import _load_panoptic
-
-
-def _make_pan_xlsx(rows: list[dict]) -> Path:
-    """Escribe filas en un Excel temporal y devuelve su path."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
-    tmp.close()
-    pd.DataFrame(rows).to_excel(tmp.name, index=False)
-    return Path(tmp.name)
-
-
-class TestLoadPanopticFiltroAnio:
-
-    def test_excluye_filas_con_anio_2025(self):
-        path = _make_pan_xlsx([
-            _pan(**{"Financial year of origin": 2023}),
-            _pan(**{"Financial year of origin": 2025}),  # debe quedar fuera
-            _pan(**{"Financial year of origin": 2024}),
-        ])
-        df = _load_panoptic(path)
-        assert 2025 not in df["Financial year of origin"].values
-        assert len(df) == 2
-
-    def test_conserva_anios_distintos_de_2025(self):
-        path = _make_pan_xlsx([
-            _pan(**{"Financial year of origin": 2020}),
-            _pan(**{"Financial year of origin": 2021}),
-            _pan(**{"Financial year of origin": 2022}),
-        ])
-        df = _load_panoptic(path)
-        assert len(df) == 3
-
-    def test_archivo_solo_con_2025_queda_vacio(self):
-        path = _make_pan_xlsx([
-            _pan(**{"Financial year of origin": 2025}),
-            _pan(**{"Financial year of origin": 2025}),
-        ])
-        df = _load_panoptic(path)
-        assert len(df) == 0

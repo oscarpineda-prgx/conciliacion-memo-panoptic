@@ -22,7 +22,6 @@ _P1_EXCLUDE_CAUSE   = "Limitation in a systems functionality"
 _P1_VALID_STAGES    = {"Posting", "Vendor"}
 _P1_VALID_STATUSES  = {"In Review", "Posted"}
 _AMOUNT_TOLERANCE   = 1.0
-_PAN_EXCLUDE_YEAR   = 2025  # Auditoría cubre 2020-2024; excluir año en curso
 
 _P4_KEY_COLS = [
     "Num Proveedor", "Año", "Concepto", "Num Categoria",
@@ -95,7 +94,6 @@ def _load_panoptic(path: Path) -> pd.DataFrame:
         df["Financial year of origin"] = pd.to_numeric(
             df["Financial year of origin"], errors="coerce"
         ).astype("Int64")
-        df = df[df["Financial year of origin"] != _PAN_EXCLUDE_YEAR].reset_index(drop=True)
     return df
 
 
@@ -494,6 +492,60 @@ def _cruce_resumen(df_pan_memo: pd.DataFrame, df_memo_pf: pd.DataFrame) -> pd.Da
 
 
 # ---------------------------------------------------------------------------
+# Paso 3 — Enriquecimiento de Incons Montos con periodos por vendor
+# ---------------------------------------------------------------------------
+
+def _agregar_periodos_incon_montos(
+    incon_montos: pd.DataFrame,
+    df_pan_memo: pd.DataFrame,
+    df_memo_ca: pd.DataFrame,
+) -> pd.DataFrame:
+    """Agrega tres columnas de periodos a Incons Montos.
+
+    Periodos Panoptic:   años distintos en Financial year of origin para ese vendor en Panoptic.
+    Periodos Memo:       años distintos en Año para ese vendor en MontoxConceptoxAño.
+    Periodos Diferencia: años presentes en uno pero no en el otro (diferencia simétrica).
+    Formato: "2020 - 2021 - 2022"
+    """
+    if incon_montos.empty:
+        incon_montos = incon_montos.copy()
+        incon_montos["Periodos Panoptic"]   = pd.Series(dtype=str)
+        incon_montos["Periodos Memo"]       = pd.Series(dtype=str)
+        incon_montos["Periodos Diferencia"] = pd.Series(dtype=str)
+        return incon_montos
+
+    year_col = "Financial year of origin"
+
+    pan_year_sets: dict[str, set[int]] = {}
+    if year_col in df_pan_memo.columns:
+        for vendor, grp in df_pan_memo.groupby("Vendor number"):
+            pan_year_sets[str(vendor)] = set(grp[year_col].dropna().astype(int).tolist())
+
+    memo_year_sets: dict[str, set[int]] = {}
+    if "Num Proveedor" in df_memo_ca.columns and "Año" in df_memo_ca.columns:
+        for vendor, grp in df_memo_ca.groupby("Num Proveedor"):
+            memo_year_sets[str(vendor)] = set(grp["Año"].dropna().astype(int).tolist())
+
+    def _fmt(years: set[int]) -> str:
+        return " - ".join(str(y) for y in sorted(years))
+
+    result = incon_montos.copy()
+    periodos_pan, periodos_memo, periodos_diff = [], [], []
+
+    for vendor in result["Vendor number"].astype(str):
+        pan_set  = pan_year_sets.get(vendor, set())
+        memo_set = memo_year_sets.get(vendor, set())
+        periodos_pan.append(_fmt(pan_set))
+        periodos_memo.append(_fmt(memo_set))
+        periodos_diff.append(_fmt(pan_set.symmetric_difference(memo_set)))
+
+    result["Periodos Panoptic"]   = periodos_pan
+    result["Periodos Memo"]       = periodos_memo
+    result["Periodos Diferencia"] = periodos_diff
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Paso 3b — Identificar claims que causan la diferencia de monto
 # ---------------------------------------------------------------------------
 
@@ -796,6 +848,7 @@ def _reconcile_memo_from_df(
     incon_montos = incon_montos[
         [c for c in _INCON_MONTOS_COLS if c in incon_montos.columns]
     ]
+    incon_montos = _agregar_periodos_incon_montos(incon_montos, df_pan_memo, df_memo_ca)
 
     # P3b — Claims que generan la diferencia de monto
     df_incon_diffs = _identificar_diferencias_x_monto(
