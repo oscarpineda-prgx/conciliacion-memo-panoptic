@@ -17,6 +17,7 @@ import pytest
 
 from conciliacion_memo_panoptic.conciliation.processing import (
     _agregar_periodos_incon_montos,
+    _compute_duplicados_x_memo,
     _cruce_resumen,
     _identificar_diferencias_x_monto,
     _p1_filter_mask,
@@ -510,6 +511,107 @@ class TestPaso4Duplicados:
 
 
 # ---------------------------------------------------------------------------
+# _compute_duplicados_x_memo
+# ---------------------------------------------------------------------------
+
+def _make_ca_df(vendor: str, rows: list[dict]) -> pd.DataFrame:
+    """Construye un DataFrame de MontoxConceptoxAño para un vendor."""
+    base = {
+        "Num Proveedor": vendor, "Año": 2023,
+        "Concepto": "MERMA DE ORIGEN", "Num Categoria": "CAT01",
+        "Monto antes impuestos": 100.0, "IEPS": 0.0, "IVA": 16.0,
+    }
+    return pd.DataFrame([{**base, **r} for r in rows])
+
+
+class TestComputeDuplicadosXMemo:
+
+    def _vendor_sets(self, mapping: dict[str, list[str]]) -> dict[str, set[str]]:
+        """mapping: {memo_id: [vendor1, vendor2, ...]}"""
+        return {mid: set(vendors) for mid, vendors in mapping.items()}
+
+    def test_filas_identicas_en_dos_memos_es_duplicado(self):
+        # Proveedor 1001 tiene las mismas 2 filas en M043 y M049
+        row_a = {"Año": 2022, "Concepto": "MERMA", "Num Categoria": "C1",
+                 "Monto antes impuestos": 100.0, "IEPS": 0.0, "IVA": 16.0}
+        row_b = {"Año": 2023, "Concepto": "MERMA", "Num Categoria": "C1",
+                 "Monto antes impuestos": 200.0, "IEPS": 0.0, "IVA": 32.0}
+        sets = self._vendor_sets({"M043": ["1001"], "M049": ["1001"]})
+        ca_dfs = {
+            "M043": _make_ca_df("1001", [row_a, row_b]),
+            "M049": _make_ca_df("1001", [row_a, row_b]),
+        }
+        result = _compute_duplicados_x_memo(sets, {}, ca_dfs)
+        assert len(result) == 1
+        assert result.iloc[0]["Vendor number"] == "1001"
+        assert result.iloc[0]["Filas duplicadas"] == 2
+
+    def test_una_sola_fila_identica_ya_es_duplicado(self):
+        # Con 1 fila idéntica entre memos ya es suficiente para marcar duplicado
+        row_a = {"Año": 2022, "Concepto": "MERMA", "Num Categoria": "C1",
+                 "Monto antes impuestos": 100.0, "IEPS": 0.0, "IVA": 16.0}
+        row_b_m043 = {"Año": 2023, "Concepto": "OTROS", "Num Categoria": "C2",
+                      "Monto antes impuestos": 500.0, "IEPS": 0.0, "IVA": 80.0}
+        row_b_m049 = {"Año": 2023, "Concepto": "DIFERENTE", "Num Categoria": "C3",
+                      "Monto antes impuestos": 999.0, "IEPS": 0.0, "IVA": 0.0}
+        sets = self._vendor_sets({"M043": ["1001"], "M049": ["1001"]})
+        ca_dfs = {
+            "M043": _make_ca_df("1001", [row_a, row_b_m043]),
+            "M049": _make_ca_df("1001", [row_a, row_b_m049]),
+        }
+        result = _compute_duplicados_x_memo(sets, {}, ca_dfs)
+        assert len(result) == 1
+        assert result.iloc[0]["Filas duplicadas"] == 1
+
+    def test_informacion_diferente_no_es_duplicado(self):
+        # Mismo vendor en 2 memos pero filas completamente distintas
+        sets = self._vendor_sets({"M043": ["1001"], "M049": ["1001"]})
+        ca_dfs = {
+            "M043": _make_ca_df("1001", [{"Año": 2020, "Concepto": "A", "Monto antes impuestos": 100.0}]),
+            "M049": _make_ca_df("1001", [{"Año": 2022, "Concepto": "B", "Monto antes impuestos": 999.0}]),
+        }
+        result = _compute_duplicados_x_memo(sets, {}, ca_dfs)
+        assert len(result) == 0
+
+    def test_vendor_en_solo_un_memo_no_aparece(self):
+        sets = self._vendor_sets({"M043": ["1001"], "M049": ["2002"]})
+        row = {"Año": 2023, "Concepto": "MERMA", "Num Categoria": "C1",
+               "Monto antes impuestos": 100.0, "IEPS": 0.0, "IVA": 16.0}
+        ca_dfs = {
+            "M043": _make_ca_df("1001", [row, row]),
+            "M049": _make_ca_df("2002", [row, row]),
+        }
+        result = _compute_duplicados_x_memo(sets, {}, ca_dfs)
+        assert len(result) == 0
+
+    def test_sin_memo_ca_dfs_retorna_vacio(self):
+        sets = self._vendor_sets({"M043": ["1001"], "M049": ["1001"]})
+        result = _compute_duplicados_x_memo(sets, {}, None)
+        assert len(result) == 0
+        assert "Filas duplicadas" in result.columns
+
+    def test_memos_involucrados_son_solo_los_duplicados(self):
+        # Vendor en M043, M049, M055 — solo M043 y M049 tienen filas iguales
+        row_dup = {"Año": 2022, "Concepto": "MERMA", "Num Categoria": "C1",
+                   "Monto antes impuestos": 100.0, "IEPS": 0.0, "IVA": 16.0}
+        row_dup2 = {"Año": 2023, "Concepto": "FILL RATE", "Num Categoria": "C2",
+                    "Monto antes impuestos": 200.0, "IEPS": 0.0, "IVA": 32.0}
+        row_distinto = {"Año": 2024, "Concepto": "APERTURA", "Num Categoria": "C9",
+                        "Monto antes impuestos": 999.0, "IEPS": 0.0, "IVA": 0.0}
+        sets = self._vendor_sets({"M043": ["1001"], "M049": ["1001"], "M055": ["1001"]})
+        ca_dfs = {
+            "M043": _make_ca_df("1001", [row_dup, row_dup2]),
+            "M049": _make_ca_df("1001", [row_dup, row_dup2]),
+            "M055": _make_ca_df("1001", [row_distinto]),
+        }
+        result = _compute_duplicados_x_memo(sets, {}, ca_dfs)
+        assert len(result) == 1
+        assert "M043" in result.iloc[0]["Memos"]
+        assert "M049" in result.iloc[0]["Memos"]
+        assert "M055" not in result.iloc[0]["Memos"]
+
+
+# ---------------------------------------------------------------------------
 # _agregar_periodos_incon_montos
 # ---------------------------------------------------------------------------
 
@@ -601,10 +703,8 @@ def _df_pan_memo(*rows) -> pd.DataFrame:
 
 def _incon_montos_row(**overrides) -> dict:
     row = {
-        "Vendor number":              "1001",
-        "Vendor name":                "Proveedor Test SA",
-        "Amount Difference":          0.0,
-        "Net Amount Difference":      0.0,
+        "Vendor number": "1001",
+        "Vendor name":   "Proveedor Test SA",
     }
     row.update(overrides)
     return row
@@ -612,90 +712,125 @@ def _incon_montos_row(**overrides) -> dict:
 
 class TestIdentificarDiferenciasXMonto:
 
-    def test_anio_no_existe_en_memo_detectado(self):
-        # Panoptic tiene año 2024, MEMO solo tiene año 2023 → estrategia 1
+    def test_concepto_solo_en_panoptic_aparece_con_memo_cero(self):
+        # "PROMOCION COMPRA" existe en Panoptic pero NO en MEMO → MEMO=0, Dif Neta > 0
         pan = _df_pan_memo(_pan(**{
-            "Financial year of origin": 2024,
-            "Posting reference number": "M049",
+            "Claim cause description": "PROMOCION COMPRA",
+            "Net claim amount": 6628.48, "Total tax amount": 0.0,
+            "Posting reference number": "M043",
         }))
-        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        memo_ca = pd.DataFrame([_memo_ca(**{"Concepto": "OTRO CONCEPTO",
+                                             "Monto antes impuestos": 100.0, "IVA": 0.0})])
         incon = pd.DataFrame([_incon_montos_row()])
-        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
-        assert len(result) == 1
-        assert "2024 no existe en MEMO" in result.iloc[0]["Motivo detección"]
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M043")
+        assert len(result) >= 1
+        row = result[result["Concepto"] == "PROMOCION COMPRA"].iloc[0]
+        assert row["Panoptic (Neto)"] == pytest.approx(6628.48)
+        assert row["MEMO (Antes Impuestos)"] == pytest.approx(0.0)
+        assert row["Dif Neta"] == pytest.approx(6628.48)
 
-    def test_concepto_no_existe_para_ese_anio(self):
-        # Año 2023 existe en MEMO pero el concepto "DIFERENTE" no
+    def test_concepto_solo_en_memo_aparece_con_panoptic_cero(self):
+        # "FILL RATE" solo en MEMO → Panoptic=0, diferencia positiva (MEMO > Panoptic)
         pan = _df_pan_memo(_pan(**{
-            "Financial year of origin": 2023,
-            "Claim cause description":  "CONCEPTO DIFERENTE",
-            "Posting reference number": "M049",
+            "Claim cause description": "OTRO CONCEPTO",
+            "Net claim amount": 50.0, "Total tax amount": 0.0,
+            "Posting reference number": "M043",
+        }))
+        memo_ca = pd.DataFrame([
+            _memo_ca(**{"Concepto": "OTRO CONCEPTO",  "Monto antes impuestos": 50.0}),
+            _memo_ca(**{"Concepto": "FILL RATE",       "Monto antes impuestos": 200.0}),
+        ])
+        incon = pd.DataFrame([_incon_montos_row()])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M043")
+        row = result[result["Concepto"] == "FILL RATE"].iloc[0]
+        assert row["Panoptic (Neto)"] == pytest.approx(0.0)
+        assert row["MEMO (Antes Impuestos)"] == pytest.approx(200.0)
+        assert row["Dif Neta"] == pytest.approx(-200.0)
+
+    def test_concepto_en_ambos_sin_diferencia_no_aparece(self):
+        # "MERMA DE ORIGEN": Panoptic Net=100 Gross=100, MEMO Antes Imp=100 Total=100 → no diferencia
+        pan = _df_pan_memo(_pan(**{
+            "Claim cause description": "MERMA DE ORIGEN",
+            "Net claim amount": 100.0, "Total tax amount": 0.0,
+            "Posting reference number": "M043",
         }))
         memo_ca = pd.DataFrame([_memo_ca(**{
-            "Año": 2023, "Concepto": "MERMA DE ORIGEN",
+            "Concepto": "MERMA DE ORIGEN",
+            "Monto antes impuestos": 100.0, "IEPS": 0.0, "IVA": 0.0,
         })])
         incon = pd.DataFrame([_incon_montos_row()])
-        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
-        assert len(result) == 1
-        assert "Concepto no existe en MEMO" in result.iloc[0]["Motivo detección"]
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M043")
+        assert len(result) == 0
 
-    def test_monto_bruto_coincide_con_diferencia(self):
-        # Claim gross = 116, Amount Difference = 116 → estrategia 3
+    def test_concepto_en_ambos_con_diferencia_aparece(self):
+        # "DESCUENTO": Panoptic Net=500, MEMO=300 → diferencia de 200
         pan = _df_pan_memo(_pan(**{
-            "Net claim amount": 100.0, "Total tax amount": 16.0,
-            "Financial year of origin": 2023,
-            "Posting reference number": "M049",
+            "Claim cause description": "DESCUENTO",
+            "Net claim amount": 500.0, "Total tax amount": 0.0,
+            "Posting reference number": "M043",
         }))
-        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
-        incon = pd.DataFrame([_incon_montos_row(**{"Amount Difference": 116.0})])
-        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
-        assert any("Monto bruto" in r for r in result["Motivo detección"].values)
-
-    def test_monto_neto_coincide_con_diferencia_neta(self):
-        # Claim net = 100, Net Amount Difference = 100 → estrategia 4
-        pan = _df_pan_memo(_pan(**{
-            "Net claim amount": 100.0, "Total tax amount": 16.0,
-            "Financial year of origin": 2023,
-            "Posting reference number": "M049",
-        }))
-        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
-        incon = pd.DataFrame([_incon_montos_row(**{"Net Amount Difference": 100.0})])
-        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
-        assert any("Monto neto" in r for r in result["Motivo detección"].values)
-
-    def test_sin_diferencias_retorna_vacio(self):
-        # Claim año = 2023, MEMO tiene año 2023 y mismo concepto, diffs = 0 → nada detectado
-        pan = _df_pan_memo(_pan(**{
-            "Financial year of origin": 2023,
-            "Claim cause description":  "MERMA DE ORIGEN",
-            "Net claim amount": 100.0, "Total tax amount": 16.0,
-            "Posting reference number": "M049",
-        }))
-        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023, "Concepto": "MERMA DE ORIGEN"})])
-        incon = pd.DataFrame([_incon_montos_row(**{
-            "Amount Difference": 0.0, "Net Amount Difference": 0.0,
+        memo_ca = pd.DataFrame([_memo_ca(**{
+            "Concepto": "DESCUENTO", "Monto antes impuestos": 300.0,
         })])
-        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
+        incon = pd.DataFrame([_incon_montos_row()])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M043")
+        assert len(result) == 1
+        assert result.iloc[0]["Dif Neta"] == pytest.approx(200.0)
+
+    def test_limitation_excluida_del_agrupado(self):
+        # "Limitation in a systems functionality" nunca debe aparecer
+        pan = _df_pan_memo(
+            _pan(**{"Claim cause description": "Limitation in a systems functionality",
+                    "Net claim amount": 9999.0, "Total tax amount": 0.0,
+                    "Posting reference number": "M043"}),
+            _pan(**{"Claim cause description": "DESCUENTO",
+                    "Net claim amount": 500.0,  "Total tax amount": 0.0,
+                    "Posting reference number": "M043"}),
+        )
+        memo_ca = pd.DataFrame([_memo_ca(**{
+            "Concepto": "DESCUENTO", "Monto antes impuestos": 200.0,
+        })])
+        incon = pd.DataFrame([_incon_montos_row()])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M043")
+        assert "LIMITATION IN A SYSTEMS FUNCTIONALITY" not in result["Concepto"].values
+        row = result[result["Concepto"] == "DESCUENTO"].iloc[0]
+        assert row["Panoptic (Neto)"] == pytest.approx(500.0)
+
+    def test_bruto_incluye_impuestos(self):
+        # Panoptic: Net=100, Tax=16 → Gross=116; MEMO: Antes Imp=100, IEPS=0, IVA=16 → Total=116
+        # Dif Neta: 100-100=0, Dif Total: 116-116=0 → no aparece
+        pan = _df_pan_memo(_pan(**{
+            "Claim cause description": "MERMA DE ORIGEN",
+            "Net claim amount": 100.0, "Total tax amount": 16.0,
+            "Posting reference number": "M043",
+        }))
+        memo_ca = pd.DataFrame([_memo_ca(**{
+            "Concepto": "MERMA DE ORIGEN",
+            "Monto antes impuestos": 100.0, "IEPS": 0.0, "IVA": 16.0,
+        })])
+        incon = pd.DataFrame([_incon_montos_row()])
+        result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M043")
         assert len(result) == 0
 
     def test_incon_montos_vacio_retorna_vacio(self):
         pan = _df_pan_memo(_pan())
         memo_ca = pd.DataFrame([_memo_ca()])
-        incon = pd.DataFrame(columns=["Vendor number", "Vendor name",
-                                       "Amount Difference", "Net Amount Difference"])
+        incon = pd.DataFrame(columns=["Vendor number", "Vendor name"])
         result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
         assert len(result) == 0
 
     def test_columnas_de_salida_correctas(self):
         pan = _df_pan_memo(_pan(**{
-            "Financial year of origin": 2024,
+            "Claim cause description": "PROMOCION COMPRA",
+            "Net claim amount": 500.0, "Total tax amount": 0.0,
             "Posting reference number": "M049",
         }))
-        memo_ca = pd.DataFrame([_memo_ca(**{"Año": 2023})])
+        memo_ca = pd.DataFrame([_memo_ca(**{"Concepto": "OTRO", "Monto antes impuestos": 0.0})])
         incon = pd.DataFrame([_incon_montos_row()])
         result = _identificar_diferencias_x_monto(pan, memo_ca, incon, "M049")
-        for col in ["Memo", "Vendor number", "Claim number", "Motivo detección",
-                    "Amount Difference (MEMO)", "Net Amount Difference (MEMO)"]:
+        for col in ["Memo", "Vendor number", "Vendor name", "Concepto",
+                    "Panoptic (Neto)", "MEMO (Antes Impuestos)", "Dif Neta",
+                    "Panoptic (Bruto)", "MEMO (Total)", "Dif Total"]:
             assert col in result.columns
 
 

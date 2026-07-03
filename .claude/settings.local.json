@@ -41,7 +41,16 @@
       "Bash(.venv\\\\Scripts\\\\python.exe -m pytest tests/ -v --tb=short)",
       "Bash(python -m pytest tests/ -v --tb=short)",
       "Bash(python -m pytest tests/test_processing.py -v --tb=short)",
-      "Bash(python -m PyInstaller \"Conciliacion PRGX.spec\" --noconfirm)"
+      "Bash(python -m PyInstaller \"Conciliacion PRGX.spec\" --noconfirm)",
+      "Bash(python -m pytest tests/test_processing.py::TestComputeDuplicadosXMemo -v --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_processing.py::TestIdentificarDiferenciasXMonto -v --tb=long)",
+      "Bash(.venv/Scripts/python.exe -m pytest \"tests/test_processing.py::TestIdentificarDiferenciasXMonto::test_concepto_solo_en_panoptic_aparece_con_memo_cero\" \"tests/test_processing.py::TestIdentificarDiferenciasXMonto::test_concepto_en_ambos_sin_diferencia_no_aparece\" --tb=long -s)",
+      "Bash(ls \"x:/Soriana/00 - AUDITORIA 2020 - 2024/00 - Auditores/Oscar/\" 2>/dev/null)",
+      "Read(//x/Soriana/00 - AUDITORIA 2020 - 2024/00 - Auditores/Oscar/**)",
+      "Bash(find \"x:/Soriana/00 - AUDITORIA 2020 - 2024\" -name \"Memo_04*.xlsx\" -o -name \"Memo_05*.xlsx\" 2>/dev/null | head -5)",
+      "Read(//x/Soriana/00 - AUDITORIA 2020 - 2024/**)",
+      "Bash(python -c \"import zipfile; z=zipfile.ZipFile\\('dist/Conciliacion_PRGX_distribucion.zip'\\); print\\('\\\\n'.join\\(z.namelist\\(\\)\\)\\)\")",
+      "Bash(.venv/Scripts/pyinstaller \"Conciliacion PRGX.spec\" --noconfirm)"
     ]
   }
 }

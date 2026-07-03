@@ -37,12 +37,9 @@ _INCON_MONTOS_COLS = [
     "Amount Difference", "Net Amount Difference", "Vendor Status", "Amount Status",
 ]
 _DIFFS_COLS = [
-    "Memo", "Vendor number", "Vendor name", "Claim number",
-    "Financial year of origin", "Posting reference number",
-    "Net claim amount", "Total tax amount", "Gross claim amount",
-    "Claim cause description", "Stage", "Status", "Assigned to",
-    "Amount Difference (MEMO)", "Net Amount Difference (MEMO)",
-    "Motivo detección",
+    "Memo", "Vendor number", "Vendor name", "Concepto",
+    "Panoptic (Neto)", "MEMO (Antes Impuestos)", "Dif Neta",
+    "Panoptic (Bruto)", "MEMO (Total)", "Dif Total",
 ]
 _DEFAULT_TEMPLATE_PATH = PROJECT_ROOT / "data" / "templates" / "Claim_Bulk_Update_Template.xlsx"
 
@@ -555,115 +552,97 @@ def _identificar_diferencias_x_monto(
     incon_montos: pd.DataFrame,
     memo_id: str,
 ) -> pd.DataFrame:
-    """Para cada vendor con diferencia de monto (Incons Montos), identifica
-    los claims específicos de Panoptic que generan esa diferencia.
+    """Para cada vendor en Incons Montos, compara Panoptic vs MEMO agrupado por concepto.
 
-    Estrategias de detección (acumulativas — un claim puede activar varias):
-    1. Año del claim no existe en MEMO para ese vendor.
-    2. Concepto del claim no existe en MEMO para ese vendor/año (cuando el año sí existe).
-    3. Monto bruto del claim ≈ Amount Difference del vendor (±1 peso).
-    4. Monto neto del claim ≈ Net Amount Difference del vendor (±1 peso).
-
-    Los claims detectados se anotan con la columna 'Motivo detección' indicando
-    qué estrategias los identificaron.
+    Identifica cuáles conceptos causan la diferencia de monto por proveedor.
+    Panoptic usa 'Claim cause description'; MEMO usa 'Concepto'.
+    El join se hace por nombre normalizado (uppercase + strip).
+    Solo muestra conceptos con diferencia significativa (> _AMOUNT_TOLERANCE).
     """
     if incon_montos.empty or df_pan_memo.empty:
         return pd.DataFrame(columns=_DIFFS_COLS)
 
-    year_col = "Financial year of origin"
-
-    # Excluir "Limitation" — consistente con el cálculo de montos en _cruce_resumen
+    # Excluir "Limitation" — consistente con _cruce_resumen
     pan_base = df_pan_memo.copy()
     if "Claim cause description" in pan_base.columns:
         pan_base = pan_base[
             pan_base["Claim cause description"].fillna("").str.strip() != _P1_EXCLUDE_CAUSE
         ]
     pan_base = pan_base.copy()
-    pan_base["Gross claim amount"] = (
+    pan_base["_gross"] = (
         pan_base["Net claim amount"].fillna(0.0)
         + pan_base["Total tax amount"].fillna(0.0)
     )
-
-    has_year_col    = year_col in pan_base.columns
-    has_concepto    = "Concepto" in df_memo_ca.columns and "Claim cause description" in pan_base.columns
 
     rows: list[dict] = []
 
     for _, incon_row in incon_montos.iterrows():
         vendor      = str(incon_row["Vendor number"]).strip()
-        amount_diff = float(incon_row.get("Amount Difference", 0) or 0)
-        net_diff    = float(incon_row.get("Net Amount Difference", 0) or 0)
         vendor_name = str(incon_row.get("Vendor name", "") or "")
 
-        # Claims de este vendor en el memo actual
-        pan_v = pan_base[_normalize_vendor(pan_base["Vendor number"]) == vendor]
-        if pan_v.empty:
-            continue
+        # --- Panoptic: agrupar claims de este vendor por concepto normalizado ---
+        pan_v = pan_base[_normalize_vendor(pan_base["Vendor number"]) == vendor].copy()
+        if not pan_v.empty and "Claim cause description" in pan_v.columns:
+            pan_v["_concept"] = pan_v["Claim cause description"].fillna("").str.strip().str.upper()
+            pan_by_concept = (
+                pan_v
+                .groupby("_concept", as_index=False)
+                .agg(pan_net=("Net claim amount", "sum"), pan_gross=("_gross", "sum"))
+            )
+        else:
+            pan_by_concept = pd.DataFrame(columns=["_concept", "pan_net", "pan_gross"])
 
-        # Años y (año, concepto) disponibles en MEMO para este vendor
-        memo_v = df_memo_ca[df_memo_ca["Num Proveedor"] == vendor]
-        memo_years: set[int] = (
-            set(memo_v["Año"].dropna().astype(int).tolist())
-            if not memo_v.empty else set()
+        # --- MEMO: agrupar MontoxConceptoxAño de este vendor por concepto normalizado ---
+        memo_v = df_memo_ca[df_memo_ca["Num Proveedor"] == vendor].copy()
+        if not memo_v.empty and "Concepto" in memo_v.columns:
+            for col in ["Monto antes impuestos", "IEPS", "IVA"]:
+                if col not in memo_v.columns:
+                    memo_v[col] = 0.0
+            memo_v["_concept"] = memo_v["Concepto"].fillna("").str.strip().str.upper()
+            memo_by_concept = (
+                memo_v
+                .groupby("_concept", as_index=False)
+                .agg(
+                    memo_net=("Monto antes impuestos", "sum"),
+                    memo_ieps=("IEPS", "sum"),
+                    memo_iva=("IVA", "sum"),
+                )
+            )
+            memo_by_concept["memo_total"] = (
+                memo_by_concept["memo_net"]
+                + memo_by_concept["memo_ieps"]
+                + memo_by_concept["memo_iva"]
+            )
+        else:
+            memo_by_concept = pd.DataFrame(columns=["_concept", "memo_net", "memo_total"])
+
+        # --- Outer join por concepto: detecta qué conceptos tienen diferencia ---
+        merged = pd.merge(pan_by_concept, memo_by_concept, on="_concept", how="outer")
+        for col in ["pan_net", "pan_gross", "memo_net", "memo_total"]:
+            if col not in merged.columns:
+                merged[col] = 0.0
+            else:
+                merged[col] = merged[col].fillna(0.0)
+
+        merged["dif_neta"]  = merged["pan_net"]   - merged["memo_net"]
+        merged["dif_total"] = merged["pan_gross"] - merged["memo_total"]
+
+        dif_mask = (
+            (merged["dif_neta"].abs()  > _AMOUNT_TOLERANCE) |
+            (merged["dif_total"].abs() > _AMOUNT_TOLERANCE)
         )
-        memo_concepts_by_year: set[tuple] = set()
-        if has_concepto and not memo_v.empty:
-            memo_concepts_by_year = {
-                (int(r["Año"]), str(r["Concepto"]).strip().upper())
-                for _, r in memo_v.dropna(subset=["Año"]).iterrows()
-            }
-
-        motivos: dict[object, list[str]] = {}
-
-        for idx, claim in pan_v.iterrows():
-            found: list[str] = []
-
-            claim_year    = claim.get(year_col) if has_year_col else None
-            claim_concept = str(claim.get("Claim cause description", "") or "").strip().upper()
-            claim_gross   = float(claim["Gross claim amount"])
-            claim_net     = float(claim.get("Net claim amount", 0) or 0)
-
-            # Estrategia 1 — año no existe en MEMO
-            if has_year_col and pd.notna(claim_year) and int(claim_year) not in memo_years:
-                found.append(f"Año {int(claim_year)} no existe en MEMO")
-            # Estrategia 2 — concepto no existe en MEMO para ese año (solo si el año sí existe)
-            elif (
-                has_concepto and has_year_col
-                and pd.notna(claim_year)
-                and (int(claim_year), claim_concept) not in memo_concepts_by_year
-            ):
-                found.append(f"Concepto no existe en MEMO para año {int(claim_year)}")
-
-            # Estrategia 3 — monto bruto ≈ diferencia total (solo si la diferencia es significativa)
-            if abs(amount_diff) > _AMOUNT_TOLERANCE and abs(claim_gross - abs(amount_diff)) <= _AMOUNT_TOLERANCE:
-                found.append(f"Monto bruto ≈ diferencia ({amount_diff:+.2f})")
-
-            # Estrategia 4 — monto neto ≈ diferencia neta
-            if abs(net_diff) > _AMOUNT_TOLERANCE and abs(claim_net - abs(net_diff)) <= _AMOUNT_TOLERANCE:
-                found.append(f"Monto neto ≈ dif. neta ({net_diff:+.2f})")
-
-            if found:
-                motivos[idx] = found
-
-        for idx, motivo_list in motivos.items():
-            claim = pan_v.loc[idx]
+        for _, row in merged[dif_mask].iterrows():
             rows.append({
-                "Memo":                         memo_id,
-                "Vendor number":                vendor,
-                "Vendor name":                  vendor_name,
-                "Claim number":                 claim.get("Claim number", ""),
-                "Financial year of origin":     claim.get(year_col) if has_year_col else None,
-                "Posting reference number":     claim.get("Posting reference number", ""),
-                "Net claim amount":             float(claim.get("Net claim amount", 0) or 0),
-                "Total tax amount":             float(claim.get("Total tax amount", 0) or 0),
-                "Gross claim amount":           float(claim["Gross claim amount"]),
-                "Claim cause description":      claim.get("Claim cause description", ""),
-                "Stage":                        claim.get("Stage", ""),
-                "Status":                       claim.get("Status", ""),
-                "Assigned to":                  claim.get("Assigned to", ""),
-                "Amount Difference (MEMO)":     amount_diff,
-                "Net Amount Difference (MEMO)": net_diff,
-                "Motivo detección":             " | ".join(motivo_list),
+                "Memo":                   memo_id,
+                "Vendor number":          vendor,
+                "Vendor name":            vendor_name,
+                "Concepto":               row["_concept"],
+                "Panoptic (Neto)":        float(row["pan_net"]),
+                "MEMO (Antes Impuestos)": float(row["memo_net"]),
+                "Dif Neta":               float(row["dif_neta"]),
+                "Panoptic (Bruto)":       float(row["pan_gross"]),
+                "MEMO (Total)":           float(row["memo_total"]),
+                "Dif Total":              float(row["dif_total"]),
             })
 
     if not rows:
@@ -700,33 +679,92 @@ def _paso4_duplicados(df_memo_ca: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFr
 # Paso 2b — Proveedores duplicados en múltiples memos
 # ---------------------------------------------------------------------------
 
+# Columnas de MontoxConceptoxAño usadas para comparar si dos filas son idénticas entre memos
+_DUPL_MEMO_KEY_COLS = ["Año", "Concepto", "Num Categoria", "Monto antes impuestos", "IEPS", "IVA"]
+# Mínimo de filas idénticas entre memos para considerar que un proveedor está duplicado
+_DUPL_MIN_MATCHING_ROWS = 1
+
+_DUPL_OUTPUT_COLS = ["Vendor number", "Vendor name", "Memos", "Cantidad de Memos", "Filas duplicadas"]
+
+
 def _compute_duplicados_x_memo(
     memo_vendor_sets: dict[str, set[str]],
     vendor_names: dict[str, str] | None = None,
+    memo_ca_dfs: dict[str, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
-    """Detecta proveedores que aparecen en más de un MEMO.
+    """Detecta proveedores con contenido duplicado en MontoxConceptoxAño entre múltiples MEMOs.
 
-    Devuelve DataFrame con columnas:
-    Vendor number, Vendor name, Memos (ej. M049-M051-M054), Cantidad de Memos.
+    Un proveedor se considera duplicado solo si tiene >= _DUPL_MIN_MATCHING_ROWS filas
+    idénticas (Año + Concepto + Num Categoria + montos) al comparar su data entre distintos
+    MEMOs. Que un proveedor aparezca en varios memos con información distinta NO es duplicado.
+
+    Columnas de salida: Vendor number, Vendor name, Memos, Cantidad de Memos, Filas duplicadas.
     """
+    _empty = pd.DataFrame(columns=_DUPL_OUTPUT_COLS)
+
+    # Proveedores presentes en más de un memo
     vendor_to_memos: dict[str, list[str]] = {}
     for memo_id, vendors in memo_vendor_sets.items():
         for vendor in vendors:
             vendor_to_memos.setdefault(vendor, []).append(memo_id)
 
-    rows = []
-    for vendor, memos in vendor_to_memos.items():
-        if len(memos) > 1:
-            memos_sorted = sorted(memos)
-            rows.append({
-                "Vendor number":     vendor,
-                "Vendor name":       (vendor_names or {}).get(vendor, ""),
-                "Memos":             "-".join(memos_sorted),
-                "Cantidad de Memos": len(memos_sorted),
-            })
+    multi_memo_vendors = {v: memos for v, memos in vendor_to_memos.items() if len(memos) > 1}
+    if not multi_memo_vendors or not memo_ca_dfs:
+        return _empty
+
+    rows: list[dict] = []
+
+    for vendor, memos in multi_memo_vendors.items():
+        # Recopilar filas de MontoxConceptoxAño de este vendor en cada memo
+        frames: list[pd.DataFrame] = []
+        for mid in memos:
+            df_ca = memo_ca_dfs.get(mid)
+            if df_ca is None or df_ca.empty:
+                continue
+            vendor_rows = df_ca[df_ca["Num Proveedor"] == vendor].copy()
+            if vendor_rows.empty:
+                continue
+            vendor_rows["_memo_id"] = mid
+            frames.append(vendor_rows)
+
+        if len(frames) < 2:
+            continue
+
+        all_rows = pd.concat(frames, ignore_index=True)
+        key_cols = [c for c in _DUPL_MEMO_KEY_COLS if c in all_rows.columns]
+        if not key_cols:
+            continue
+
+        # Normalizar para evitar fallos por NaN o tipos mixtos en el groupby
+        subset = all_rows[key_cols + ["_memo_id"]].copy()
+        for col in key_cols:
+            if subset[col].dtype == object or str(subset[col].dtype).startswith("string"):
+                subset[col] = subset[col].fillna("").astype(str).str.strip().str.upper()
+            else:
+                subset[col] = pd.to_numeric(subset[col], errors="coerce").fillna(0)
+
+        # Contar cuántos memos distintos tienen cada combinación clave
+        grp = subset.groupby(key_cols)["_memo_id"].nunique()
+        cross_dupl = grp[grp >= 2]  # combinaciones presentes en 2+ memos distintos
+
+        if len(cross_dupl) < _DUPL_MIN_MATCHING_ROWS:
+            continue
+
+        # Determinar exactamente qué memos están involucrados en las filas duplicadas
+        dupl_key_df = cross_dupl.reset_index()[key_cols]
+        involved_rows = subset.merge(dupl_key_df, on=key_cols, how="inner")
+        involved_memos = sorted(involved_rows["_memo_id"].unique())
+
+        rows.append({
+            "Vendor number":     vendor,
+            "Vendor name":       (vendor_names or {}).get(vendor, ""),
+            "Memos":             "-".join(involved_memos),
+            "Cantidad de Memos": len(involved_memos),
+            "Filas duplicadas":  int(len(cross_dupl)),
+        })
 
     if not rows:
-        return pd.DataFrame(columns=["Vendor number", "Vendor name", "Memos", "Cantidad de Memos"])
+        return _empty
 
     return (
         pd.DataFrame(rows)
@@ -866,7 +904,7 @@ def _reconcile_memo_from_df(
     _dupl_sheet = (
         df_duplicados_x_memo
         if df_duplicados_x_memo is not None
-        else pd.DataFrame(columns=["Vendor number", "Vendor name", "Memos", "Cantidad de Memos"])
+        else pd.DataFrame(columns=_DUPL_OUTPUT_COLS)
     )
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_sheet(writer, df_p1_actualizados, "P1 Actualizados")
@@ -986,10 +1024,12 @@ def reconcile_all_memos(
             return True
         entries = [(mid, p) for mid, p in entries if _in_range(mid)]
 
-    # Pre-cargar vendor sets de todos los memos para la validación cruzada de P1
-    # y para detectar proveedores duplicados entre memos.
+    # Pre-cargar vendor sets y MontoxConceptoxAño de todos los memos para:
+    # - Validación cruzada de P1 (memo_vendor_sets)
+    # - Detección de duplicados por contenido entre memos (memo_ca_dfs)
     memo_vendor_sets: dict[str, set[str]] = {}
     _vendor_names: dict[str, str] = {}
+    _memo_ca_dfs: dict[str, pd.DataFrame] = {}
     for mid, mpath in entries:
         try:
             df_pf = _load_memo_prov_fase(mpath)
@@ -1003,8 +1043,14 @@ def reconcile_all_memos(
                 )
         except Exception:
             memo_vendor_sets[mid] = set()
+        try:
+            _memo_ca_dfs[mid] = _load_memo_concepto_ano(mpath)
+        except Exception:
+            pass
 
-    df_duplicados_x_memo = _compute_duplicados_x_memo(memo_vendor_sets, _vendor_names)
+    df_duplicados_x_memo = _compute_duplicados_x_memo(
+        memo_vendor_sets, _vendor_names, _memo_ca_dfs
+    )
 
     results: list[MemoResult] = []
     claims_accumulator: list[pd.DataFrame] = []

@@ -72,9 +72,74 @@ class PanopticNavigator:
         if not self.wait_for_claims_page():
             raise RuntimeError("No se pudo abrir la pagina de Claims.")
 
+    def dismiss_feature_announcement(self) -> bool:
+        """Cierra el panel lateral de anuncio de nuevos features si está visible.
+
+        Panoptic muestra ocasionalmente un panel deslizante en el lado derecho
+        anunciando nuevas funcionalidades. Este método lo detecta y lo cierra
+        antes de continuar con cualquier navegación.
+        """
+        try:
+            self.page.get_by_text(
+                re.compile(r"New Features are Coming", re.I)
+            ).first.wait_for(state="visible", timeout=3_000)
+        except PlaywrightTimeoutError:
+            return False
+
+        self.log("Panel de anuncio de nuevos features detectado — cerrando")
+
+        def _panel_gone() -> bool:
+            try:
+                self.page.get_by_text(
+                    re.compile(r"New Features are Coming", re.I)
+                ).first.wait_for(state="hidden", timeout=1_500)
+                return True
+            except PlaywrightTimeoutError:
+                return False
+
+        # Estrategia 1: Escape (más confiable en Angular Material)
+        try:
+            self.page.keyboard.press("Escape")
+            self._wait_after_click()
+            if _panel_gone():
+                self.log("Panel de anuncios cerrado con Escape")
+                return True
+        except PlaywrightError:
+            pass
+
+        # Estrategia 2: botones de cierre con timeout corto
+        for selector in [
+            'button:has(mat-icon:has-text("close"))',
+            '[aria-label*="close" i]',
+            'button:has-text("×")',
+        ]:
+            try:
+                self.page.locator(selector).first.click(timeout=1_000)
+                self._wait_after_click()
+                if _panel_gone():
+                    self.log("Panel de anuncios cerrado con botón")
+                    return True
+            except (PlaywrightTimeoutError, PlaywrightError):
+                continue
+
+        # Estrategia 3: navegar directo a Claims (evita el panel completamente)
+        self.log("No se pudo cerrar el panel — navegando directo a Claims")
+        try:
+            self.page.goto(
+                self._claims_url(),
+                wait_until="domcontentloaded",
+                timeout=self.timeout_ms,
+            )
+            return True
+        except PlaywrightError:
+            pass
+
+        return False
+
     def go_to_claims(self) -> None:
         if self.is_claims_page():
             return
+        self.dismiss_feature_announcement()
         self.click_claims_button()
         if not self.wait_for_claims_page(timeout_ms=5_000):
             self.click_claims_task_link()

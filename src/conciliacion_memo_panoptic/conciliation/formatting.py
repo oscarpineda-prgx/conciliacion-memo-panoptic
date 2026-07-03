@@ -33,7 +33,7 @@ SHEET_SUBTITLES: dict[str, str] = {
     "Incons Proveedores":    "P2 — Inconsistencias de Proveedor",
     "Incons DuplicadosxMemo":    "P2b — Proveedores Duplicados en Múltiples Memos",
     "Incons Montos":             "P3 — Inconsistencias de Monto",
-    "Incons DiferenciasXMonto":  "P3b — Claims que Generan la Diferencia de Monto por Proveedor",
+    "Incons DiferenciasXMonto":  "P3b — Diferencia de Monto por Concepto y Proveedor",
     "Incons Concepto-Año":  "P4 — Duplicados Concepto / Año en MEMO",
     "Cruce Resumen":        "Cruce Resumen Proveedores",
     "Cruce Detalle":        "Cruce Detalle Concepto - Año",
