@@ -462,9 +462,9 @@ def _write_template(template_path: Path, output_path: Path, rows: list[list]) ->
 
 
 def generate_posting_date_template(df_cruce: pd.DataFrame, output_path: Path) -> Path:
-    """Genera plantilla 'Import claim updates' con Posting submission date y Batch number.
+    """Genera plantilla 'Import claim updates' con Posting submission date, Batch number y Posting reference number.
 
-    Columnas: Project name | Claim number | Posting submission date (yyyy-mm-dd) | Batch number
+    Columnas: Project name | Claim number | Posting submission date (yyyy-mm-dd) | Batch number | Posting reference number
     Solo incluye filas donde Posting submission date no es nulo.
     """
     rows = [
@@ -473,6 +473,7 @@ def generate_posting_date_template(df_cruce: pd.DataFrame, output_path: Path) ->
             row["Claim number"],
             _fmt_date(row[_PAN_POST_DATE]),
             row.get(_PAN_BATCH),
+            row.get(_PAN_POSTING_REF),
         ]
         for _, row in df_cruce.iterrows()
         if pd.notna(row.get(_PAN_POST_DATE))
@@ -727,3 +728,74 @@ def run_etapa2(
     print_fn(f"  Completados: {len(ok)} | Errores: {len(failed)}")
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Helpers para actualización de Status (comando update-claim-statuses)
+# ---------------------------------------------------------------------------
+
+def get_status_update_claims(
+    etapa2_path: Path,
+) -> tuple[list[str], list[str]]:
+    """Lee la hoja 'Cruce Exitoso' de un archivo Etapa 2 y clasifica los claims.
+
+    Returns:
+        invoice_ready_claims: Claim numbers con Folio Compensatorio
+            (Last recovery number con valor) → Status = "Invoice ready"
+        posted_claims: Claim numbers SIN Folio pero con Batch number
+            → Status = "Posted"
+    """
+    from .formatting import HEADER_ROWS
+
+    df = pd.read_excel(
+        etapa2_path,
+        sheet_name="Cruce Exitoso",
+        header=HEADER_ROWS,
+        dtype=str,
+    )
+
+    # Normalizar: reemplazar NaN y strings vacíos/sólo espacios por None
+    def _has_value(series: "pd.Series") -> "pd.Series":
+        return series.notna() & series.str.strip().str.len().gt(0)
+
+    if _PAN_LAST_REC_NO not in df.columns:
+        raise KeyError(
+            f"Columna '{_PAN_LAST_REC_NO}' no encontrada en 'Cruce Exitoso' de {etapa2_path}. "
+            f"Columnas disponibles: {list(df.columns)}"
+        )
+
+    has_folio = _has_value(df[_PAN_LAST_REC_NO])
+
+    has_batch = (
+        _has_value(df[_PAN_BATCH]) if _PAN_BATCH in df.columns
+        else pd.Series(False, index=df.index)
+    )
+
+    claim_col = next(
+        (c for c in df.columns if re.search(r"claim\s*number", c, re.I)),
+        None,
+    )
+    if claim_col is None:
+        raise KeyError(
+            f"No se encontró columna 'Claim number' en 'Cruce Exitoso' de {etapa2_path}."
+        )
+
+    invoice_ready_claims = (
+        df.loc[has_folio, claim_col]
+        .dropna()
+        .str.strip()
+        .loc[lambda s: s.str.len() > 0]
+        .unique()
+        .tolist()
+    )
+
+    posted_claims = (
+        df.loc[~has_folio & has_batch, claim_col]
+        .dropna()
+        .str.strip()
+        .loc[lambda s: s.str.len() > 0]
+        .unique()
+        .tolist()
+    )
+
+    return invoice_ready_claims, posted_claims

@@ -555,7 +555,7 @@ def _identificar_diferencias_x_monto(
     """Para cada vendor en Incons Montos, compara Panoptic vs MEMO agrupado por concepto.
 
     Identifica cuáles conceptos causan la diferencia de monto por proveedor.
-    Panoptic usa 'Claim cause description'; MEMO usa 'Concepto'.
+    Panoptic usa 'Client claim type'; MEMO usa 'Concepto'.
     El join se hace por nombre normalizado (uppercase + strip).
     Solo muestra conceptos con diferencia significativa (> _AMOUNT_TOLERANCE).
     """
@@ -582,8 +582,8 @@ def _identificar_diferencias_x_monto(
 
         # --- Panoptic: agrupar claims de este vendor por concepto normalizado ---
         pan_v = pan_base[_normalize_vendor(pan_base["Vendor number"]) == vendor].copy()
-        if not pan_v.empty and "Claim cause description" in pan_v.columns:
-            pan_v["_concept"] = pan_v["Claim cause description"].fillna("").str.strip().str.upper()
+        if not pan_v.empty and "Client claim type" in pan_v.columns:
+            pan_v["_concept"] = pan_v["Client claim type"].fillna("").str.strip().str.upper()
             pan_by_concept = (
                 pan_v
                 .groupby("_concept", as_index=False)

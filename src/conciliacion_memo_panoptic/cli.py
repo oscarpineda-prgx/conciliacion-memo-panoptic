@@ -289,6 +289,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Número de memo final del rango a procesar (ej. 56).",
     )
 
+    update_status = subparsers.add_parser(
+        "update-claim-statuses",
+        help=(
+            "Lee un archivo de Etapa 2 y actualiza el Status en Panoptic: "
+            "'Invoice ready' (con Folio Compensatorio) o 'Posted' (con Batch number)."
+        ),
+    )
+    update_status.add_argument(
+        "--etapa2-file", type=Path, required=True,
+        help=(
+            "Ruta al archivo Excel de Etapa 2 (etapa2_M0XX.xlsx). "
+            "Debe contener la hoja 'Cruce Exitoso'."
+        ),
+    )
+    update_status.add_argument(
+        "--batch-size", type=int, default=50,
+        help="Máximo de claims por lote en el filtro 'In' de Panoptic (default: 50).",
+    )
+    update_status.add_argument("--config", help="Ruta a un JSON de configuracion de Panoptic.")
+    update_status.add_argument("--url", help="URL inicial de Panoptic.")
+    update_status.add_argument("--profile-dir", type=Path, help="Perfil persistente del navegador.")
+    update_status.add_argument("--timeout-ms", type=int, help="Timeout default de Playwright.")
+    update_status.add_argument("--headless", action="store_true", help="Ejecutar navegador sin UI.")
+    update_status.add_argument("--email", help="Correo para el login de Panoptic.")
+    update_status.add_argument("--view-name", default="MONICA_3", help="Vista de Claims a seleccionar.")
+
     return parser
 
 
@@ -595,6 +621,51 @@ def main(argv: list[str] | None = None) -> int:
 
         print()
         print(f"Proceso completo. Consolidado final: {consolidated}")
+        return 0
+
+    if args.command == "update-claim-statuses":
+        from .conciliation.estado_cuenta import get_status_update_claims
+        from .panoptic.workflows import update_claim_statuses
+
+        etapa2_path: Path = args.etapa2_file
+        if not etapa2_path.exists():
+            print(f"Error: el archivo no existe: {etapa2_path}")
+            return 1
+
+        print(f"Leyendo claims de: {etapa2_path}")
+        try:
+            invoice_ready, posted = get_status_update_claims(etapa2_path)
+        except Exception as exc:
+            print(f"Error al leer el archivo de Etapa 2: {exc}")
+            return 1
+
+        print(f"  Invoice ready : {len(invoice_ready)} claims")
+        print(f"  Posted        : {len(posted)} claims")
+
+        if not invoice_ready and not posted:
+            print("No hay claims para actualizar.")
+            return 0
+
+        settings = load_panoptic_settings(args.config).with_overrides(
+            start_url=args.url,
+            browser_profile_dir=args.profile_dir,
+            login_email=args.email,
+            default_timeout_ms=args.timeout_ms,
+            headless=True if args.headless else None,
+        )
+
+        try:
+            update_claim_statuses(
+                settings,
+                invoice_ready_claims=invoice_ready,
+                posted_claims=posted,
+                view_name=args.view_name,
+                batch_size=args.batch_size,
+            )
+        except Exception as exc:
+            print(f"Error al actualizar Status en Panoptic: {exc}")
+            return 1
+
         return 0
 
     parser.error(f"Comando no soportado: {args.command}")

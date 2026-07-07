@@ -280,6 +280,9 @@ class ConciliacionApp(ctk.CTk):
         self._hint(card, "Subir plantillas generadas a Panoptic")
         self._step_button(card, "  ↑  Subir Posting Date + Batch",  "e2_upload_post",  self._run_upload_posting)
         self._step_button(card, "  ↑  Subir Recoveries / Clearing", "e2_upload_rec",   self._run_upload_recoveries)
+        self._separator(card)
+        self._hint(card, "Validar y actualizar Status (Invoice ready / Posted)")
+        self._step_button(card, "  ✦  Actualizar Status en Panoptic", "e2_update_status", self._run_update_status)
 
     # ── Log area ──────────────────────────────────────────────────────────────
 
@@ -810,6 +813,198 @@ class ConciliacionApp(ctk.CTk):
         upload_recoveries_clearing_data(settings, file, view_name=_VIEW_NAME_DEFAULT,
                                         cancel_event=self._cancel_event)
         self._log("Recoveries / Clearing data actualizado en Panoptic.")
+
+    # ── Etapa 2 — Actualizar Status ───────────────────────────────────────────
+
+    def _run_update_status(self) -> None:
+        """Abre picker de archivo Etapa 2, lee los claims y muestra el diálogo de previsualización."""
+        path = filedialog.askopenfilename(
+            title="Seleccionar archivo Etapa 2 (etapa2_M*.xlsx)",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")],
+            initialdir=str(PROJECT_ROOT / "outputs" / "Etapa2"),
+        )
+        if not path:
+            return
+        file = Path(path)
+
+        self._set_status("e2_update_status", "running")
+        self._log(f"Leyendo claims de {file.name}...")
+        from .conciliation.estado_cuenta import get_status_update_claims
+        try:
+            invoice_ready, posted = get_status_update_claims(file)
+        except Exception as exc:
+            self._log(f"Error al leer {file.name}: {exc}")
+            self._set_status("e2_update_status", "error")
+            return
+
+        self._set_status("e2_update_status", "idle")
+
+        if not invoice_ready and not posted:
+            self._log("No hay claims para actualizar en el archivo seleccionado.")
+            return
+
+        self._log(
+            f"Previsualización lista: {len(invoice_ready)} Invoice ready | "
+            f"{len(posted)} Posted"
+        )
+        self._show_status_preview_dialog(file, invoice_ready, posted)
+
+    def _show_status_preview_dialog(
+        self,
+        file: Path,
+        invoice_ready: list[str],
+        posted: list[str],
+    ) -> None:
+        """Abre un diálogo modal con la previsualización de los cambios de Status."""
+        import datetime as _dt
+
+        dlg = ctk.CTkToplevel(self)
+        dlg.title("Previsualización — Actualizar Status")
+        dlg.geometry("640x560")
+        dlg.minsize(520, 460)
+        dlg.configure(fg_color=self._c("bg1"))
+        dlg.grab_set()
+        dlg.focus_set()
+        dlg.lift()
+
+        # Accent stripe
+        ctk.CTkFrame(dlg, fg_color=self._c("accent"), height=3, corner_radius=0).pack(fill="x")
+
+        # Header
+        hdr = ctk.CTkFrame(dlg, fg_color=self._c("card"), corner_radius=0)
+        hdr.pack(fill="x")
+        ctk.CTkLabel(
+            hdr,
+            text="Previsualización — Actualizar Status en Panoptic",
+            font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
+            text_color=self._c("t1"),
+        ).pack(side="left", padx=16, pady=12)
+
+        # Body scrollable
+        body = ctk.CTkScrollableFrame(dlg, fg_color=self._c("bg1"), corner_radius=0)
+        body.pack(fill="both", expand=True)
+
+        # File + date info bar
+        info_bar = ctk.CTkFrame(body, fg_color=self._c("card2"), corner_radius=8)
+        info_bar.pack(fill="x", padx=16, pady=(12, 8))
+        ctk.CTkLabel(
+            info_bar,
+            text=f"📄  {file.name}",
+            font=ctk.CTkFont("Segoe UI", 11),
+            text_color=self._c("t1"),
+        ).pack(side="left", padx=12, pady=8)
+        today_str = _dt.date.today().strftime("%m/%d/%Y")
+        ctk.CTkLabel(
+            info_bar,
+            text=f"Remind date: {today_str}  •  Lote máx: 50",
+            font=ctk.CTkFont("Segoe UI", 10),
+            text_color=self._c("t2"),
+        ).pack(side="right", padx=12, pady=8)
+
+        def _render_group(label: str, dot_color: str, claims: list[str]) -> None:
+            grp = ctk.CTkFrame(
+                body, fg_color=self._c("card"), corner_radius=8,
+                border_width=1, border_color=self._c("border"),
+            )
+            grp.pack(fill="x", padx=16, pady=(2, 8))
+
+            title_row = ctk.CTkFrame(grp, fg_color="transparent")
+            title_row.pack(fill="x", padx=12, pady=(10, 4))
+            ctk.CTkLabel(
+                title_row, text="●", text_color=dot_color,
+                font=ctk.CTkFont("Segoe UI", 10),
+            ).pack(side="left", padx=(0, 6))
+            ctk.CTkLabel(
+                title_row, text=label,
+                font=ctk.CTkFont("Segoe UI", 12, weight="bold"),
+                text_color=self._c("t1"),
+            ).pack(side="left")
+            ctk.CTkLabel(
+                title_row, text=f"{len(claims)} claims",
+                font=ctk.CTkFont("Segoe UI", 11),
+                text_color=self._c("t2"),
+            ).pack(side="right")
+
+            MAX_SHOW = 40
+            shown = claims[:MAX_SHOW]
+            rest  = len(claims) - len(shown)
+            content = "  ".join(shown)
+            if rest > 0:
+                content += f"\n  ... y {rest} más"
+
+            txt = ctk.CTkTextbox(
+                grp,
+                height=min(100, max(36, (len(shown) // 5 + 1) * 18 + 10)),
+                fg_color=self._c("bg2"),
+                text_color=self._c("t1"),
+                font=ctk.CTkFont("Consolas", 10),
+                border_width=0, corner_radius=6,
+            )
+            txt.pack(fill="x", padx=12, pady=(0, 10))
+            txt.insert("1.0", content)
+            txt.configure(state="disabled")
+
+        if invoice_ready:
+            _render_group("Invoice ready", self._c("s_ok"), invoice_ready)
+        if posted:
+            _render_group("Posted", self._c("blue"), posted)
+
+        # Footer with buttons
+        foot = ctk.CTkFrame(dlg, fg_color=self._c("card"), corner_radius=0)
+        foot.pack(fill="x", side="bottom")
+
+        total = len(invoice_ready) + len(posted)
+        ctk.CTkLabel(
+            foot,
+            text=f"Total a actualizar: {total} claims",
+            font=ctk.CTkFont("Segoe UI", 10),
+            text_color=self._c("t2"),
+        ).pack(side="left", padx=16, pady=12)
+
+        def _cancel() -> None:
+            dlg.destroy()
+
+        def _confirm() -> None:
+            dlg.destroy()
+            self._run_in_thread(
+                "e2_update_status",
+                self._update_status_fn,
+                invoice_ready,
+                posted,
+            )
+
+        ctk.CTkButton(
+            foot, text="Cancelar",
+            width=100, height=32,
+            font=ctk.CTkFont("Segoe UI", 11),
+            fg_color=self._c("card2"), hover_color=self._c("bg1"),
+            text_color=self._c("t2"), corner_radius=7,
+            border_width=1, border_color=self._c("border"),
+            command=_cancel,
+        ).pack(side="right", padx=(6, 16), pady=12)
+
+        ctk.CTkButton(
+            foot, text="✔  Confirmar y actualizar",
+            width=210, height=32,
+            font=ctk.CTkFont("Segoe UI", 11, weight="bold"),
+            fg_color=self._c("accent"), hover_color=self._c("cta_h"),
+            text_color="#FFFFFF", corner_radius=7,
+            command=_confirm,
+        ).pack(side="right", padx=6, pady=12)
+
+    def _update_status_fn(self, invoice_ready: list[str], posted: list[str]) -> None:
+        from .panoptic.workflows import update_claim_statuses
+        settings = self._load_settings()
+        self._log("Iniciando actualización de Status en Panoptic...")
+        update_claim_statuses(
+            settings,
+            invoice_ready_claims=invoice_ready,
+            posted_claims=posted,
+            view_name=_VIEW_NAME_DEFAULT,
+            cancel_event=self._cancel_event,
+            print_fn=self._log,
+        )
+        self._log("Actualización de Status completada.")
 
 
 # ---------------------------------------------------------------------------

@@ -635,6 +635,360 @@ class PanopticNavigator:
         )
         return base_path
 
+    # ---------------------------------------------------------------------------
+    # Adjust Status — actualización masiva de Status (Etapa 2)
+    # ---------------------------------------------------------------------------
+
+    def adjust_claim_status_batch(
+        self,
+        claim_numbers: list[str],
+        status: str,
+        remind_date: str,
+    ) -> None:
+        """Actualiza el Status de un lote de Claim numbers en Panoptic.
+
+        Flujo:
+        1. Filtra Claim number usando el filtro 'In'
+        2. Espera a que los resultados carguen
+        3. Selecciona todos los claims ('Select this page')
+        4. Abre 'Adjust status', selecciona status y fecha, guarda
+        5. Navega de vuelta a Claims para limpiar filtros de columna
+
+        Args:
+            claim_numbers: lista de Claim number (máx 50 recomendado)
+            status: valor a asignar (ej. "Invoice ready" o "Posted")
+            remind_date: fecha en formato MM/DD/YYYY (ej. "07/03/2026")
+        """
+        self.log(f"Ajustando status '{status}' para {len(claim_numbers)} claims")
+        self._apply_in_filter_on_claim_number(claim_numbers)
+        self._wait_for_in_filter_results()
+        self._select_page_claims()
+        self._open_adjust_status_dialog()
+        self._fill_and_save_adjust_status(status, remind_date)
+        self.log(f"Status '{status}' aplicado — limpiando filtros")
+        try:
+            self.page.goto(
+                self._claims_url(),
+                wait_until="domcontentloaded",
+                timeout=self.timeout_ms,
+            )
+        except PlaywrightError:
+            pass
+        self.page.wait_for_timeout(1_000)
+
+    def _find_column_header(self, column_name: str) -> "Locator":
+        """Devuelve el Locator del encabezado de la columna indicada."""
+        for make_loc in [
+            lambda page: page.locator(
+                f'[role="columnheader"]:has-text("{column_name}")'
+            ).first,
+            lambda page: page.locator(f'th:has-text("{column_name}")').first,
+            lambda page: page.get_by_role(
+                "columnheader",
+                name=re.compile(re.escape(column_name), re.I),
+            ).first,
+        ]:
+            try:
+                loc = make_loc(self.page)
+                loc.wait_for(state="visible", timeout=self.action_timeout_ms)
+                return loc
+            except PlaywrightTimeoutError:
+                continue
+        raise RuntimeError(
+            f"No se encontró el encabezado de columna '{column_name}'."
+        )
+
+    def _apply_in_filter_on_claim_number(self, claim_numbers: list[str]) -> None:
+        """Abre el filtro 'In' de la columna Claim number y pega los claim numbers."""
+        col_header = self._find_column_header("Claim number")
+
+        # Hover para activar el botón de filtro (≡)
+        col_header.hover()
+        self.page.wait_for_timeout(500)
+
+        # Hacer clic en el botón de filtro dentro del encabezado
+        filter_opened = False
+        for make_btn in [
+            lambda h: h.locator("button:has(mat-icon)").last,
+            lambda h: h.locator("button").last,
+            lambda h: h.locator("[class*='filter']").first,
+        ]:
+            try:
+                btn = make_btn(col_header)
+                btn.wait_for(state="visible", timeout=1_000)
+                btn.click()
+                self._wait_after_click()
+                self.page.get_by_text(
+                    re.compile(r"Is equal to", re.I)
+                ).first.wait_for(state="visible", timeout=2_000)
+                filter_opened = True
+                break
+            except (PlaywrightTimeoutError, PlaywrightError):
+                continue
+
+        if not filter_opened:
+            raise RuntimeError(
+                "No se pudo abrir el menú de filtro de la columna 'Claim number'. "
+                "Verifica que estás en la vista de Claims con la columna visible."
+            )
+
+        # Seleccionar la opción "In" (evitar capturar "Not in")
+        in_clicked = False
+        for make_loc in [
+            lambda page: page.locator('[role="menuitem"]').filter(
+                has_text=re.compile(r"^\s*In\s*$")
+            ).first,
+            lambda page: page.get_by_role(
+                "menuitem", name=re.compile(r"^\s*In\s*$")
+            ).first,
+            lambda page: page.locator('[role="option"]').filter(
+                has_text=re.compile(r"^\s*In\s*$")
+            ).first,
+        ]:
+            try:
+                loc = make_loc(self.page)
+                loc.wait_for(state="visible", timeout=self.locator_probe_timeout_ms)
+                loc.click()
+                self._wait_after_click()
+                in_clicked = True
+                break
+            except (PlaywrightTimeoutError, PlaywrightError):
+                continue
+
+        if not in_clicked:
+            raise RuntimeError(
+                "No se encontró la opción 'In' en el menú de filtro de Claim number."
+            )
+
+        # Rellenar el textarea con un Claim number por línea
+        textarea = None
+        for make_loc in [
+            lambda page: page.locator('[role="dialog"] textarea').first,
+            lambda page: page.get_by_role("dialog").locator("textarea").first,
+            lambda page: page.locator("textarea").first,
+        ]:
+            try:
+                loc = make_loc(self.page)
+                loc.wait_for(state="visible", timeout=self.action_timeout_ms)
+                textarea = loc
+                break
+            except PlaywrightTimeoutError:
+                continue
+
+        if textarea is None:
+            raise RuntimeError(
+                "No se encontró el textarea del filtro 'In' de Claim number."
+            )
+
+        textarea.click()
+        textarea.fill("\n".join(claim_numbers))
+        self._wait_after_click()
+
+        # Hacer clic en Apply
+        self._click_first(
+            [
+                lambda page: page.locator('[role="dialog"]').get_by_role(
+                    "button", name=re.compile(r"^Apply$", re.I)
+                ),
+                lambda page: page.locator(
+                    '[role="dialog"] button:has-text("Apply")'
+                ).first,
+            ],
+            "botón Apply del filtro In",
+        )
+
+    def _wait_for_in_filter_results(self) -> None:
+        """Espera a que el filtro 'In' se aplique y los claims filtrados carguen."""
+        # Esperar a que el diálogo del filtro se cierre
+        try:
+            self.page.locator('[role="dialog"]').first.wait_for(
+                state="hidden", timeout=5_000
+            )
+        except PlaywrightTimeoutError:
+            pass
+        # Esperar a que la red se estabilice tras la búsqueda
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=15_000)
+        except PlaywrightTimeoutError:
+            pass
+        # Pausa adicional: Panoptic puede tardar en activar el checkbox de selección
+        self.page.wait_for_timeout(2_500)
+
+    def _select_page_claims(self) -> None:
+        """Selecciona todos los claims de la página actual via 'Select this page'."""
+        checkbox = None
+        for make_loc in [
+            lambda page: page.locator("thead input[type='checkbox']").first,
+            lambda page: page.locator("th input[type='checkbox']").first,
+            lambda page: page.locator(
+                "[role='columnheader'] input[type='checkbox']"
+            ).first,
+        ]:
+            try:
+                loc = make_loc(self.page)
+                loc.wait_for(state="visible", timeout=self.action_timeout_ms)
+                checkbox = loc
+                break
+            except PlaywrightTimeoutError:
+                continue
+
+        if checkbox is None:
+            raise RuntimeError(
+                "No se encontró el checkbox de selección de claims en la tabla."
+            )
+
+        checkbox.click()
+        self._wait_after_click()
+
+        # Hacer clic en "Select this page" si aparece el menú desplegable
+        try:
+            opt = self.page.get_by_text(
+                re.compile(r"Select this page", re.I)
+            ).first
+            opt.wait_for(state="visible", timeout=self.action_timeout_ms)
+            opt.click()
+            self._wait_after_click()
+        except PlaywrightTimeoutError:
+            # El checkbox ya seleccionó todo directamente sin mostrar el menú
+            pass
+
+        # Verificar que la barra azul de acciones apareció
+        try:
+            self.page.get_by_text(
+                re.compile(r"\d+\s*selected", re.I)
+            ).first.wait_for(state="visible", timeout=self.action_timeout_ms)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                "No aparecieron claims seleccionados tras 'Select this page'. "
+                "¿Los claims están en distintos Stage/Status? "
+                "'Adjust status' requiere que todos tengan el mismo Stage y Status."
+            )
+
+    def _open_adjust_status_dialog(self) -> None:
+        """Hace clic en 'Adjust status' en la barra de acciones azul."""
+        self._click_first(
+            [
+                lambda page: page.get_by_role(
+                    "button", name=re.compile(r"Adjust\s*status", re.I)
+                ),
+                lambda page: page.locator(
+                    'button:has-text("Adjust status")'
+                ).first,
+            ],
+            "botón Adjust status",
+            timeout_ms=self.action_timeout_ms,
+        )
+        try:
+            self.page.get_by_role("dialog").first.wait_for(
+                state="visible", timeout=self.action_timeout_ms
+            )
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                "El diálogo 'Adjust Status' no se abrió. "
+                "Verifica que todos los claims tengan el mismo Stage y Status."
+            )
+
+    def _fill_and_save_adjust_status(self, status: str, remind_date: str) -> None:
+        """Selecciona el Status, ingresa la Claim remind date y guarda el diálogo."""
+        dialog = self.page.get_by_role("dialog").first
+
+        # --- Seleccionar Status ---
+        status_sel = None
+        for make_loc in [
+            lambda d: d.locator("mat-select").first,
+            lambda d: d.locator('[role="combobox"]').first,
+            lambda d: d.locator("select").first,
+        ]:
+            try:
+                loc = make_loc(dialog)
+                loc.wait_for(state="visible", timeout=self.action_timeout_ms)
+                status_sel = loc
+                break
+            except PlaywrightTimeoutError:
+                continue
+
+        if status_sel is None:
+            raise RuntimeError(
+                "No se encontró el dropdown de Status en el diálogo 'Adjust Status'."
+            )
+
+        status_sel.click()
+        self._wait_after_click()
+
+        # Las opciones de Angular Material aparecen fuera del DOM del dialog
+        self._click_first(
+            [
+                lambda page: page.get_by_role(
+                    "option", name=re.compile(re.escape(status), re.I)
+                ),
+                lambda page: page.locator(
+                    "mat-option",
+                    has_text=re.compile(re.escape(status), re.I),
+                ).first,
+                lambda page: page.locator(
+                    '[role="option"]',
+                    has_text=re.compile(re.escape(status), re.I),
+                ).first,
+            ],
+            f"opción '{status}' en el dropdown de Status",
+        )
+        self._wait_after_click()
+
+        # --- Claim remind date ---
+        date_input = None
+        for make_loc in [
+            lambda d: d.locator('input[placeholder*="MM/DD/YYYY" i]').first,
+            lambda d: d.locator('input[placeholder*="date" i]').first,
+            lambda d: d.locator("input").last,
+        ]:
+            try:
+                loc = make_loc(dialog)
+                loc.wait_for(state="visible", timeout=self.action_timeout_ms)
+                date_input = loc
+                break
+            except PlaywrightTimeoutError:
+                continue
+
+        if date_input is not None:
+            date_input.click()
+            # Usar Ctrl+A + type para simular tipeo real (trigger Angular change detection)
+            date_input.press("Control+A")
+            date_input.type(remind_date)
+            # Tab para confirmar y cerrar el datepicker sin cerrar el diálogo
+            date_input.press("Tab")
+            self._wait_after_click()
+
+        # --- Guardar ---
+        save_btn = None
+        for make_loc in [
+            lambda d: d.get_by_role("button", name=re.compile(r"^Save$", re.I)),
+            lambda d: d.locator('button:has-text("Save")').first,
+        ]:
+            try:
+                loc = make_loc(dialog)
+                loc.wait_for(state="visible", timeout=self.action_timeout_ms)
+                save_btn = loc
+                break
+            except PlaywrightTimeoutError:
+                continue
+
+        if save_btn is None:
+            raise RuntimeError(
+                "No se encontró el botón Save en el diálogo 'Adjust Status'."
+            )
+
+        save_btn.click()
+        self._wait_after_click()
+
+        # Esperar a que el diálogo se cierre y la actualización se aplique
+        try:
+            self.page.get_by_role("dialog").first.wait_for(
+                state="hidden", timeout=self.timeout_ms
+            )
+        except PlaywrightTimeoutError:
+            pass
+        self.page.wait_for_timeout(1_000)
+
     def _click_first(
         self,
         candidates: list[LocatorFactory],
