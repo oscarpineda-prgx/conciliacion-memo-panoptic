@@ -179,13 +179,68 @@ def discover_folio_entries(folios_dir: Path) -> list[tuple[str, Path]]:
 # Enriquecimiento in-place de filas de Panoptic
 # ---------------------------------------------------------------------------
 
+# Columnas destino agrupadas por plantilla: un claim va a una plantilla solo si se
+# actualizó alguna de SUS columnas (así no se re-suben claims ya correctos en Panoptic).
+_POSTING_DATE_COLS = (_PAN_BATCH, _PAN_POST_DATE)
+_RECOVERY_COLS = (_PAN_LAST_REC_NO, _PAN_LAST_REC_DT, _PAN_LAST_CLR_DT)
+
+
+def _is_blank(value) -> bool:
+    """True si la celda está vacía: None, NaN/NaT, o string vacío/solo espacios."""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return isinstance(value, str) and value.strip() == ""
+
+
+def _fill_blanks(df: pd.DataFrame, idx: list, values: dict) -> dict:
+    """Rellena SOLO las celdas vacías de `values` en las filas `idx`.
+
+    - Nunca sobreescribe una celda que ya tiene valor.
+    - Nunca rellena con un valor que a su vez esté vacío.
+    Devuelve ``{row_idx: {columnas efectivamente rellenadas}}`` para poder rastrear
+    qué claims se actualizaron y en qué columnas.
+    """
+    filled: dict = {}
+    for col, val in values.items():
+        if col not in df.columns or _is_blank(val):
+            continue
+        for i in idx:
+            if _is_blank(df.at[i, col]):
+                df.at[i, col] = val
+                filled.setdefault(i, set()).add(col)
+    return filled
+
+
+def _merge_filled(dest: dict, extra: dict) -> None:
+    """Acumula el resultado de _fill_blanks/_assign_batch_number en `dest` (in-place)."""
+    for i, cols in extra.items():
+        dest.setdefault(i, set()).update(cols)
+
+
+def _rows_updated_in(filled_by_row: dict, cols) -> list:
+    """Índices de filas donde se rellenó al menos una de `cols`."""
+    wanted = set(cols)
+    return [i for i, done in filled_by_row.items() if done & wanted]
+
+
 def _apply_ec_to_rows(
     df: pd.DataFrame,
     idx: list,
     ec_row: pd.Series,
     today: date,
-) -> None:
-    """Escribe los campos del Estado de Cuenta en las filas indicadas de Panoptic."""
+    *,
+    include_batch: bool = True,
+) -> dict:
+    """Escribe los campos del Estado de Cuenta en las filas `idx`, SOLO donde la celda está vacía.
+
+    include_batch=False omite Batch number (Etapa 2 lo asigna con su lógica de 3 condiciones).
+    Devuelve ``{row_idx: {columnas rellenadas}}`` (ver _fill_blanks).
+    """
     clearing_raw = ec_row.get(_EC_CLEARING_DATE)
     clearing_dt = (
         pd.to_datetime(clearing_raw, errors="coerce").date()
@@ -193,17 +248,22 @@ def _apply_ec_to_rows(
         else None
     )
 
-    df.loc[idx, _PAN_BATCH]       = ec_row.get(_EC_DOC_NUMBER)
-    df.loc[idx, _PAN_POST_DATE]   = ec_row.get(_EC_DOC_DATE)
-    df.loc[idx, _PAN_LAST_REC_NO] = ec_row.get(_EC_CLEARING_DOC)
+    values: dict = {
+        _PAN_POST_DATE:   ec_row.get(_EC_DOC_DATE),
+        _PAN_LAST_REC_NO: ec_row.get(_EC_CLEARING_DOC),
+    }
+    if include_batch:
+        values[_PAN_BATCH] = ec_row.get(_EC_DOC_NUMBER)
 
     if clearing_dt and clearing_dt > today:
         # Fecha de compensación futura: Last recovery date = hoy, Last cleared date = clearing_dt
-        df.loc[idx, _PAN_LAST_REC_DT] = today
-        df.loc[idx, _PAN_LAST_CLR_DT] = clearing_dt
+        values[_PAN_LAST_REC_DT] = today
+        values[_PAN_LAST_CLR_DT] = clearing_dt
     else:
-        df.loc[idx, _PAN_LAST_REC_DT] = clearing_dt
-        df.loc[idx, _PAN_LAST_CLR_DT] = None
+        values[_PAN_LAST_REC_DT] = clearing_dt
+        # Last cleared date se deja vacío cuando no hay compensación futura.
+
+    return _fill_blanks(df, idx, values)
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +274,11 @@ def _fmt_date(val) -> str | None:
     """Convierte cualquier valor de fecha a string 'yyyy-mm-dd', o None si está vacío."""
     if val is None:
         return None
-    if isinstance(val, float) and pd.isna(val):
-        return None
+    try:
+        if pd.isna(val):  # None / NaN / NaT (NaT es datetime-like y rompería strftime)
+            return None
+    except (TypeError, ValueError):
+        pass
     if isinstance(val, (date, datetime)):
         return val.strftime(_DATE_FMT)
     if isinstance(val, str) and val.strip():
@@ -403,25 +466,33 @@ def _assign_batch_number(
     vendor_idx: list,
     df_pan: pd.DataFrame,
     df_ec_vendor: pd.DataFrame,
-) -> None:
-    """Sobreescribe Batch number procesando por grupo de Audit project.
+) -> dict:
+    """Asigna Batch number (lógica de 3 condiciones) SOLO donde está vacío.
 
     Condición 1 (FILL RATE):     split por tax==0 / tax!=0, cruza vs EC Reference alfabética.
     Condición 2 (COSTOS/PAGOS):  EC Reference alfanumérica, toma el de mayor monto.
     Condición 3 (cualquier otro): agrupa por Client claim type, cruza vs EC Reference alfabética.
 
     Un vendor puede tener filas de distintas condiciones; cada grupo de Audit project
-    se procesa de forma independiente.
+    se procesa de forma independiente. Devuelve ``{row_idx: {"Batch number"}}`` de las
+    filas donde efectivamente se rellenó el Batch (no sobreescribe los que ya lo tenían).
     """
+    filled: dict = {}
+
+    def _apply(batch_map: dict) -> None:
+        for i, val in batch_map.items():
+            if not _is_blank(val) and _is_blank(df_pan.at[i, _PAN_BATCH]):
+                df_pan.at[i, _PAN_BATCH] = val
+                filled.setdefault(i, set()).add(_PAN_BATCH)
+
     audit_col = next(
         (c for c in df_pan.columns if c.lower() == _AUDIT_PROJECT_COL.lower()),
         None,
     )
 
     if audit_col is None:
-        for idx, val in _batch_from_cond1(vendor_idx, df_pan, df_ec_vendor).items():
-            df_pan.at[idx, _PAN_BATCH] = val
-        return
+        _apply(_batch_from_cond1(vendor_idx, df_pan, df_ec_vendor))
+        return filled
 
     for audit_val, sub_group in df_pan.loc[vendor_idx].groupby(audit_col, dropna=False):
         sub_idx = list(sub_group.index)
@@ -433,8 +504,9 @@ def _assign_batch_number(
         else:
             batch_map = _batch_from_cond3(sub_idx, df_pan, df_ec_vendor)
 
-        for idx, val in batch_map.items():
-            df_pan.at[idx, _PAN_BATCH] = val
+        _apply(batch_map)
+
+    return filled
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +628,7 @@ def cross_estado_cuenta_memo(
 
     today = date.today()
     matched_vendors: set[str] = set()
+    filled_by_row: dict = {}
     unmatched_ec: list[dict] = []
 
     for vendor, ec_group in df_ec.groupby(_EC_ACCOUNT):
@@ -572,8 +645,14 @@ def cross_estado_cuenta_memo(
         )
 
         if abs(ec_amount - pan_gross) <= _AMOUNT_TOLERANCE:
-            _apply_ec_to_rows(df_pan_memo, vendor_idx, ec_group.iloc[0], today)
-            _assign_batch_number(vendor_idx, df_pan_memo, ec_group)
+            # Rellena SOLO las columnas vacías (el Batch lo asigna _assign_batch_number).
+            _merge_filled(
+                filled_by_row,
+                _apply_ec_to_rows(
+                    df_pan_memo, vendor_idx, ec_group.iloc[0], today, include_batch=False
+                ),
+            )
+            _merge_filled(filled_by_row, _assign_batch_number(vendor_idx, df_pan_memo, ec_group))
             matched_vendors.add(vendor)
         else:
             for _, row in ec_group.iterrows():
@@ -587,11 +666,16 @@ def cross_estado_cuenta_memo(
         .copy()
     )
 
+    # Marca qué claims recibieron alguna actualización (celda vacía rellenada desde el EC).
+    df_pan_memo["Actualizado"] = df_pan_memo.index.map(
+        lambda i: "Sí" if i in filled_by_row else "No"
+    )
     df_cruce     = df_pan_memo[df_pan_memo[_PAN_VENDOR].isin(matched_vendors)].copy()
     df_sin_match = pd.DataFrame(unmatched_ec)
 
     print_fn(f"    Proveedores EC:        {df_ec[_EC_ACCOUNT].nunique() if not df_ec.empty else 0}")
     print_fn(f"    Coincidencias:         {len(matched_vendors)}")
+    print_fn(f"    Claims actualizados:   {len(filled_by_row)}")
     print_fn(f"    Sin coincidencia EC:   {len(unmatched_ec)}")
     print_fn(f"    Panoptic sin folio:    {len(df_pan_sin_folio)}")
     if not matched_vendors:
@@ -612,14 +696,19 @@ def cross_estado_cuenta_memo(
         write_sheet(writer, df_pan_sin_folio,  "Panoptic Sin Folio")
         style_workbook(writer.book)
 
-    # Generar plantillas de carga solo si hubo coincidencias
-    if not df_cruce.empty:
+    # Plantillas: SOLO los claims donde se actualizó alguna columna de ESA plantilla,
+    # para no re-subir a Panoptic claims que ya tenían la información correcta.
+    posting_idx = _rows_updated_in(filled_by_row, _POSTING_DATE_COLS)
+    recov_idx   = _rows_updated_in(filled_by_row, _RECOVERY_COLS)
+    if posting_idx:
         generate_posting_date_template(
-            df_cruce, memo_dir / f"etapa2_{memo_id}_PostingDate.xlsx"
+            df_pan_memo.loc[posting_idx], memo_dir / f"etapa2_{memo_id}_PostingDate.xlsx"
         )
+    if recov_idx:
         generate_recoveries_template(
-            df_cruce, memo_dir / f"etapa2_{memo_id}_Recoveries.xlsx"
+            df_pan_memo.loc[recov_idx], memo_dir / f"etapa2_{memo_id}_Recoveries.xlsx"
         )
+    print_fn(f"    Plantillas -> PostingDate: {len(posting_idx)} claims | Recoveries: {len(recov_idx)} claims")
 
     return output_path
 

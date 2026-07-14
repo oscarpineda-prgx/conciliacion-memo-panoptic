@@ -41,6 +41,11 @@ SHEET_SUBTITLES: dict[str, str] = {
     "Cruce Exitoso":        "Etapa 2 — Proveedores con Folio Compensatorio Coincidente",
     "Sin Coincidencia":     "Etapa 2 — Proveedores EC sin Coincidencia en Panoptic",
     "Panoptic Sin Folio":   "Etapa 2 — Proveedores Panoptic sin Folio Compensatorio",
+    # Etapa 3 — Nivel de Servicio (NS-EneAgo25)
+    "Resumen NS":           "Etapa 3 — Nivel de Servicio (NS-EneAgo25) — Resumen",
+    "Bitacora vs Panoptic": "Etapa 3 — Bitácora (auditor) vs Panoptic  [validación primaria]",
+    "Panoptic Sin EC":      "Etapa 3 — Proveedores Panoptic NS sin Estado de Cuenta",
+    "Reembolsos":           "Etapa 3 — Reembolsos (Cross-check Bitácora vs EC / Panoptic)",
 }
 
 
@@ -83,15 +88,15 @@ def _style_sheet(ws, subtitle: str, logo_path: Path | None) -> None:
         img.anchor = "B2"
         ws.add_image(img)
 
-    # --- Título empresa (fila 3, cols C:G — más a la izquierda) ---
-    ws.merge_cells("C3:G3")
+    # --- Título empresa (fila 3, cols C:I) ---
+    ws.merge_cells("C3:I3")
     cell_title = ws["C3"]
     cell_title.value = "Tiendas Soriana, S.A. de C.V."
     cell_title.font = Font(bold=True, size=14, color="000000")
     cell_title.alignment = _ALIGN_CENTER
 
-    # --- Subtítulo de la hoja (fila 4, cols C:G — más a la izquierda) ---
-    ws.merge_cells("C4:G4")
+    # --- Subtítulo de la hoja (fila 4, cols C:I) ---
+    ws.merge_cells("C4:I4")
     cell_sub = ws["C4"]
     cell_sub.value = subtitle
     cell_sub.font = Font(bold=True, size=12, color="000000")

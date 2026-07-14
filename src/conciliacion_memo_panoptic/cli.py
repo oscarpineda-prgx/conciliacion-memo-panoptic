@@ -216,6 +216,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Número de memo final del rango a procesar (ej. 56).",
     )
 
+    cross_ns = subparsers.add_parser(
+        "cross-nivel-servicio",
+        help=(
+            "Etapa 3 — Consolida los BLOQUE*.xlsx del Estado de Cuenta NS y los cruza "
+            "contra Panoptic (Posting reference = NS-EneAgo25, Status != Rejected)."
+        ),
+    )
+    cross_ns.add_argument(
+        "--raw-panoptic", type=Path, required=True,
+        help="Ruta al XLSX de Panoptic actualizado (vista MONICA_3).",
+    )
+    cross_ns.add_argument(
+        "--blocks-dir", type=Path,
+        default=Path(r"X:\Soriana\00 - AUDITORIA 2020 - 2024\BLOQUES ESTADO CUENTA"),
+        help="Carpeta con los BLOQUE*.xlsx del Estado de Cuenta NS.",
+    )
+    cross_ns.add_argument(
+        "--bitacora", type=Path,
+        default=Path(
+            r"X:\Soriana\00 - AUDITORIA 2020 - 2024\00 - Auditores\Oscar\Proyectos Python"
+            r"\Conciliacion_Memo_Panoptic\BITACORA_ACLARACIONES_NS 2025 (2).xlsx"
+        ),
+        help="Archivo de bitácora NS (hoja Reembolsos) para el cross-check.",
+    )
+    cross_ns.add_argument(
+        "--output-dir", type=Path, default=Path("outputs/Etapa3"),
+        help="Carpeta de salida.",
+    )
+    cross_ns.add_argument(
+        "--solo-capa1", action="store_true",
+        help=(
+            "Ejecuta SOLO la Capa 1 (Bitácora vs Panoptic). No lee los bloques del EC, "
+            "así que es casi instantáneo. Genera etapa3_NS_capa1.xlsx."
+        ),
+    )
+
     run_etapa2 = subparsers.add_parser(
         "run-etapa2",
         help=(
@@ -531,6 +567,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Completados: {len(ok)} | Errores: {len(failed)}")
         print(f"Reportes guardados en: {args.output_dir.resolve()}")
         return 1 if failed else 0
+
+    if args.command == "cross-nivel-servicio":
+        from .conciliation.nivel_servicio import run_nivel_servicio_from_file
+
+        print(f"Cargando Panoptic: {args.raw_panoptic}")
+        if args.solo_capa1:
+            print("Modo: SOLO Capa 1 (Bitácora vs Panoptic) — no se leen los bloques del EC.")
+        else:
+            print(f"Bloques EC: {args.blocks_dir}")
+        print()
+        try:
+            res = run_nivel_servicio_from_file(
+                args.raw_panoptic, args.blocks_dir, args.bitacora, args.output_dir,
+                solo_capa1=args.solo_capa1,
+            )
+        except Exception as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        print()
+        print(f"  [Capa 1 - Bitacora vs Panoptic] coinciden:    {res.bita_coincide}")
+        print(f"  [Capa 1 - Bitacora vs Panoptic] NO coinciden: {res.bita_no_coincide}")
+        if not args.solo_capa1:
+            print(f"  [Capa 2 - EC vs Panoptic] coincidentes:       {res.matched_vendors}")
+            print(f"  [Capa 2 - EC vs Panoptic] descuadre/sin match:{res.mismatched_vendors}")
+            print(f"  Panoptic NS sin EC:                           {res.panoptic_sin_ec}")
+            print(f"  Claims para carga (actualizados):             {res.claims_para_carga}")
+        print(f"  Reporte: {res.output_path}")
+        if res.posting_date_path:
+            print(f"  Plantilla PostingDate: {res.posting_date_path}")
+            print(f"  Plantilla Recoveries:  {res.recoveries_path}")
+            print("  NOTA: las plantillas SOLO se generaron en disco — NO se subieron a Panoptic.")
+        return 0 if res.ok else 1
 
     if args.command == "run-etapa2":
         try:
