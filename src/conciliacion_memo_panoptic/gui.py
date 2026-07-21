@@ -83,6 +83,8 @@ class ConciliacionApp(ctk.CTk):
         self._running        = False
         self._cancel_event   = threading.Event()
         self._headless_var   = ctk.BooleanVar(value=False)
+        self._manual_var     = ctk.BooleanVar(value=False)
+        self._ec_file_paths:   list[Path]                    = []
         self._status_dots:     dict[str, ctk.CTkLabel]       = {}
         self._progress_bars:   dict[str, ctk.CTkProgressBar] = {}
         self._pulse_tasks:     dict[str, str]                 = {}
@@ -98,8 +100,8 @@ class ConciliacionApp(ctk.CTk):
 
     def _setup_window(self) -> None:
         self.title("Conciliación MEMO × Panoptic — PRGX")
-        self.geometry("1140x820")
-        self.minsize(980, 700)
+        self.geometry("1160x940")
+        self.minsize(1000, 760)
         self.configure(fg_color=self._c("bg1"))
         if _ICON_PRGX.exists():
             try:
@@ -115,12 +117,14 @@ class ConciliacionApp(ctk.CTk):
     # ── Build ────────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(3, weight=3)   # área de tarjetas (scrollable)
+        self.grid_rowconfigure(4, weight=2)   # log
         self.grid_columnconfigure(0, weight=1)
-        self._build_header()
-        self._build_config_bar()
-        self._build_main_area()
-        self._build_log_area()
+        self._build_header()          # row 0
+        self._build_config_bar()      # row 1
+        self._build_manual_panel()    # row 2 (oculto salvo en modo manual)
+        self._build_main_area()       # row 3
+        self._build_log_area()        # row 4
 
     # ── Header ───────────────────────────────────────────────────────────────
 
@@ -184,18 +188,25 @@ class ConciliacionApp(ctk.CTk):
         bar.grid_propagate(False)
 
         kw = {"padx": 10, "pady": 14}
-        ctk.CTkLabel(bar, text="Memo desde:", text_color=self._c("t2"),
+        ctk.CTkLabel(bar, text="Memos:", text_color=self._c("t2"),
                      font=ctk.CTkFont("Segoe UI", 12)).pack(side="left", **kw)
-        self._from_var = ctk.StringVar(value="40")
-        ctk.CTkEntry(bar, textvariable=self._from_var, width=54, height=30,
+        self._memos_var = ctk.StringVar(value="40-56")
+        ctk.CTkEntry(bar, textvariable=self._memos_var, width=130, height=30,
+                     placeholder_text="40-56  o  48, 49, 50",
                      fg_color=self._c("bg1"), text_color=self._c("t1"),
-                     border_color=self._c("border")).pack(side="left", padx=(0, 6), pady=14)
-        ctk.CTkLabel(bar, text="hasta:", text_color=self._c("t2"),
-                     font=ctk.CTkFont("Segoe UI", 12)).pack(side="left", padx=(0, 6), pady=14)
-        self._to_var = ctk.StringVar(value="56")
-        ctk.CTkEntry(bar, textvariable=self._to_var, width=54, height=30,
-                     fg_color=self._c("bg1"), text_color=self._c("t1"),
-                     border_color=self._c("border")).pack(side="left", padx=(0, 20), pady=14)
+                     border_color=self._c("border")).pack(side="left", padx=(0, 12), pady=14)
+
+        ctk.CTkFrame(bar, fg_color=self._c("sep"), width=1, height=30).pack(side="left", padx=4, pady=14)
+
+        ctk.CTkCheckBox(
+            bar, text="Ejecución manual", variable=self._manual_var,
+            command=self._toggle_manual,
+            font=ctk.CTkFont("Segoe UI", 11, weight="bold"),
+            text_color=self._c("accent"),
+            fg_color=self._c("accent"), hover_color=self._c("cta_h"),
+            checkmark_color="#FFFFFF", border_color=self._c("border"),
+            width=20, height=20,
+        ).pack(side="left", padx=(10, 14), pady=14)
 
         ctk.CTkFrame(bar, fg_color=self._c("sep"), width=1, height=30).pack(side="left", padx=4, pady=14)
 
@@ -247,15 +258,102 @@ class ConciliacionApp(ctk.CTk):
         )
         self._stop_btn.pack(side="right", padx=(0, 16), pady=14)
 
+    # ── Panel de modo manual (plegable) ───────────────────────────────────────
+
+    def _build_manual_panel(self) -> None:
+        panel = ctk.CTkFrame(self, fg_color=self._c("card2"), corner_radius=0)
+        panel.grid(row=2, column=0, sticky="ew")
+        panel.grid_columnconfigure(0, weight=1)
+        self._manual_panel = panel
+
+        ctk.CTkFrame(panel, fg_color=self._c("accent"), height=2, corner_radius=0).grid(
+            row=0, column=0, columnspan=2, sticky="ew")
+        ctk.CTkLabel(
+            panel, text="⚙  Modo manual — corre solo los Memos/Proveedores indicados; EC en un archivo único (Etapa 2)",
+            font=ctk.CTkFont("Segoe UI", 11, weight="bold"), text_color=self._c("accent"),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 2))
+
+        # Izquierda: proveedores
+        left = ctk.CTkFrame(panel, fg_color="transparent")
+        left.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 10))
+        left.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(left, text="Proveedores (Vendor number, uno por línea):",
+                     font=ctk.CTkFont("Segoe UI", 11), text_color=self._c("t2")).grid(
+            row=0, column=0, sticky="w")
+        self._vendors_box = ctk.CTkTextbox(
+            left, height=70, fg_color=self._c("bg1"), text_color=self._c("t1"),
+            font=ctk.CTkFont("Consolas", 11), border_width=1,
+            border_color=self._c("border"), corner_radius=6)
+        self._vendors_box.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+
+        # Derecha: archivo EC
+        right = ctk.CTkFrame(panel, fg_color="transparent")
+        right.grid(row=2, column=1, sticky="nw", padx=(6, 14), pady=(0, 10))
+        ctk.CTkLabel(right, text="Archivo(s) Estado de Cuenta (varios memos · solo Etapa 2):",
+                     font=ctk.CTkFont("Segoe UI", 11), text_color=self._c("t2")).pack(anchor="w")
+        picker = ctk.CTkFrame(right, fg_color="transparent")
+        picker.pack(anchor="w", pady=(4, 0))
+        self._ec_label = ctk.CTkLabel(
+            picker, text=self._ec_label_text(), text_color=self._c("t1"),
+            font=ctk.CTkFont("Segoe UI", 11), width=280, anchor="w")
+        self._ec_label.pack(side="left", padx=(0, 6))
+        ctk.CTkButton(picker, text="📂", width=34, height=30, fg_color=self._c("card"),
+                      hover_color=self._c("bg1"), text_color=self._c("t1"), corner_radius=6,
+                      command=self._pick_ec_file).pack(side="left")
+        ctk.CTkButton(picker, text="✕", width=28, height=30, fg_color=self._c("card"),
+                      hover_color=self._c("bg1"), text_color=self._c("t1"), corner_radius=6,
+                      command=self._clear_ec_files).pack(side="left", padx=(4, 0))
+        ctk.CTkLabel(right, text="Puedes seleccionar varios · la salida va a outputs/EtapaX_Manual/",
+                     font=ctk.CTkFont("Segoe UI", 10), text_color=self._c("t2")).pack(
+            anchor="w", pady=(6, 0))
+
+        if not self._manual_var.get():
+            panel.grid_remove()
+
+    def _ec_label_text(self) -> str:
+        n = len(self._ec_file_paths)
+        if n == 0:
+            return "— ninguno seleccionado —"
+        if n == 1:
+            return self._ec_file_paths[0].name
+        return f"{n} archivos seleccionados"
+
+    def _clear_ec_files(self) -> None:
+        self._ec_file_paths = []
+        self._ec_label.configure(text=self._ec_label_text(), text_color=self._c("t1"))
+        self._log("Archivos EC (manual): selección limpiada.")
+
+    def _toggle_manual(self) -> None:
+        if self._manual_var.get():
+            self._manual_panel.grid()
+            self._log("Modo manual ACTIVADO — se filtra por Memos + Proveedores; salida a outputs/EtapaX_Manual/")
+        else:
+            self._manual_panel.grid_remove()
+            self._log("Modo manual desactivado — ejecución normal.")
+
+    def _pick_ec_file(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Seleccionar archivo(s) de Estado de Cuenta (uno o varios)",
+            filetypes=[("Excel", "*.xlsx *.xls"), ("Todos", "*.*")],
+            initialdir=str(_FOLIOS_DIR_DEFAULT),
+        )
+        if paths:
+            self._ec_file_paths = [Path(p) for p in paths]
+            self._ec_label.configure(text=self._ec_label_text(), text_color=self._c("t1"))
+            names = ", ".join(p.name for p in self._ec_file_paths)
+            self._log(f"Archivo(s) EC (manual): {names}")
+
     # ── Main area ─────────────────────────────────────────────────────────────
 
     def _build_main_area(self) -> None:
-        main = ctk.CTkFrame(self, fg_color=self._c("bg1"), corner_radius=0)
-        main.grid(row=2, column=0, sticky="nsew", padx=0, pady=(2, 0))
+        main = ctk.CTkScrollableFrame(self, fg_color=self._c("bg1"), corner_radius=0)
+        main.grid(row=3, column=0, sticky="nsew", padx=0, pady=(2, 0))
         main.grid_columnconfigure((0, 1), weight=1, uniform="col")
-        main.grid_rowconfigure(0, weight=1)
+        # Fila 0: Etapa 1 y 2  |  Fila 1: Etapa 3 y 4
         self._build_etapa1_card(main)
         self._build_etapa2_card(main)
+        self._build_etapa3_card(main)
+        self._build_etapa4_card(main)
 
     def _build_etapa1_card(self, parent: ctk.CTkFrame) -> None:
         card = self._make_card(parent, col=0)
@@ -284,11 +382,27 @@ class ConciliacionApp(ctk.CTk):
         self._hint(card, "Validar y actualizar Status (Invoice ready / Posted)")
         self._step_button(card, "  ✦  Actualizar Status en Panoptic", "e2_update_status", self._run_update_status)
 
+    def _build_etapa3_card(self, parent: ctk.CTkFrame) -> None:
+        card = self._make_card(parent, col=0, row=1)
+        self._section_title(card, "ETAPA 3", "Nivel de Servicio · Ene-Ago 2025", "03")
+        self._cta_button(card, "▶  Ejecutar Etapa 3 completa", "e3_all", self._run_etapa3_all)
+        self._separator(card)
+        self._hint(card, "Usa el Panoptic de arriba · Bitácora + bloques EC (~7 min)")
+        self._step_button(card, "  ⇄  Solo Capa 1 (Bitácora vs Panoptic)", "e3_capa1", self._run_etapa3_capa1)
+
+    def _build_etapa4_card(self, parent: ctk.CTkFrame) -> None:
+        card = self._make_card(parent, col=1, row=1)
+        self._section_title(card, "ETAPA 4", "Nivel de Servicio · Sep-Dic 2025", "04")
+        self._cta_button(card, "▶  Ejecutar Etapa 4 completa", "e4_all", self._run_etapa4_all)
+        self._separator(card)
+        self._hint(card, "Usa el Panoptic de arriba · Bitácora 'resto' + bloques (~7 min)")
+        self._step_button(card, "  ⇄  Solo Capa 1 (Bitácora vs Panoptic)", "e4_capa1", self._run_etapa4_capa1)
+
     # ── Log area ──────────────────────────────────────────────────────────────
 
     def _build_log_area(self) -> None:
         frame = ctk.CTkFrame(self, fg_color=self._c("bg2"), corner_radius=0)
-        frame.grid(row=3, column=0, sticky="nsew", padx=0, pady=(2, 0))
+        frame.grid(row=4, column=0, sticky="nsew", padx=0, pady=(2, 0))
         frame.grid_columnconfigure(0, weight=1)
         frame.grid_rowconfigure(1, weight=1)
 
@@ -320,12 +434,13 @@ class ConciliacionApp(ctk.CTk):
 
     # ── Widget helpers ────────────────────────────────────────────────────────
 
-    def _make_card(self, parent: ctk.CTkFrame, col: int) -> ctk.CTkFrame:
+    def _make_card(self, parent: ctk.CTkFrame, col: int, row: int = 0) -> ctk.CTkFrame:
         px_l = 16 if col == 0 else 8
         px_r =  8 if col == 0 else 16
         card = ctk.CTkFrame(parent, fg_color=self._c("card"), corner_radius=12,
                             border_width=1, border_color=self._c("border"))
-        card.grid(row=0, column=col, sticky="nsew", padx=(px_l, px_r), pady=14)
+        card.grid(row=row, column=col, sticky="nsew",
+                  padx=(px_l, px_r), pady=(14 if row == 0 else 6, 14))
         return card
 
     def _section_title(self, parent: ctk.CTkFrame, title: str, subtitle: str, badge: str) -> None:
@@ -424,8 +539,8 @@ class ConciliacionApp(ctk.CTk):
     # ── Theme ─────────────────────────────────────────────────────────────────
 
     def _toggle_theme(self) -> None:
-        memo_from   = self._from_var.get()
-        memo_to     = self._to_var.get()
+        memos_text   = self._memos_var.get()
+        vendors_text = self._vendors_box.get("1.0", "end-1c") if hasattr(self, "_vendors_box") else ""
         pan_path    = self._panoptic_path
         headless    = self._headless_var.get()
         log_content = self._log_box.get("1.0", "end-1c") if hasattr(self, "_log_box") else ""
@@ -451,8 +566,9 @@ class ConciliacionApp(ctk.CTk):
         self._build_ui()
 
         # Restore transient state
-        self._from_var.set(memo_from)
-        self._to_var.set(memo_to)
+        self._memos_var.set(memos_text)
+        if vendors_text.strip() and hasattr(self, "_vendors_box"):
+            self._vendors_box.insert("1.0", vendors_text)
         self._headless_var.set(headless)
         self._panoptic_path = pan_path
         if pan_path:
@@ -584,13 +700,29 @@ class ConciliacionApp(ctk.CTk):
 
     # ── Threading ────────────────────────────────────────────────────────────
 
-    def _get_memo_range(self) -> tuple[int | None, int | None]:
-        def _parse(v: str) -> int | None:
-            try:
-                return int(v) if v.strip() else None
-            except ValueError:
-                return None
-        return _parse(self._from_var.get()), _parse(self._to_var.get())
+    def _get_memos(self) -> set[int] | None:
+        """Memos del campo (lista/rango, ej. '40-56' o '48, 49, 50'). None = todos."""
+        from .conciliation.processing import parse_memo_numbers
+        return parse_memo_numbers(self._memos_var.get()) or None
+
+    def _get_vendors(self) -> set[str] | None:
+        """Vendor numbers del textbox — solo en modo manual. None = sin filtro."""
+        if not self._manual_var.get():
+            return None
+        from .conciliation.processing import parse_vendor_numbers
+        text = self._vendors_box.get("1.0", "end-1c") if hasattr(self, "_vendors_box") else ""
+        return parse_vendor_numbers(text) or None
+
+    def _get_ec_file(self) -> list[Path] | None:
+        """Archivo(s) EC — solo en modo manual. None = sin archivos (o modo normal)."""
+        if not self._manual_var.get():
+            return None
+        return list(self._ec_file_paths) if self._ec_file_paths else None
+
+    def _manual_output(self, base: str) -> Path:
+        """outputs/{base}_Manual en modo manual; si no, outputs/{base}."""
+        sub = f"{base}_Manual" if self._manual_var.get() else base
+        return PROJECT_ROOT / "outputs" / sub
 
     def _run_in_thread(self, key: str, fn, *args) -> None:
         if self._running:
@@ -661,9 +793,10 @@ class ConciliacionApp(ctk.CTk):
     def _etapa1_all_fn(self) -> None:
         from .conciliation.processing import reconcile_all_memos, consolidate_results
         from .panoptic.downloader import download_xlsx
-        mf, mt   = self._get_memo_range()
+        memos    = self._get_memos()
+        vendors  = self._get_vendors()
         settings = self._load_settings()
-        output   = PROJECT_ROOT / "outputs" / "Etapa1"
+        output   = self._manual_output("Etapa1")
 
         self._log("ETAPA 1 — Descargando Panoptic...")
         self._set_status("e1_download", "running")
@@ -678,7 +811,7 @@ class ConciliacionApp(ctk.CTk):
 
         self._log("ETAPA 1 — Conciliando memos...")
         self._set_status("e1_reconcile", "running")
-        reconcile_all_memos(raw, _MEMO_DIR_DEFAULT, output, memo_from=mf, memo_to=mt,
+        reconcile_all_memos(raw, _MEMO_DIR_DEFAULT, output, memos=memos, vendors=vendors,
                             cancel_event=self._cancel_event)
         self._set_status("e1_reconcile", "ok")
         if self._cancel_event.is_set():
@@ -689,7 +822,7 @@ class ConciliacionApp(ctk.CTk):
         consolidate_results(output)
         self._set_status("e1_consolidate", "ok")
 
-        self._log("ETAPA 1 completada. Revisa outputs/Etapa1/ antes de subir a Panoptic.")
+        self._log(f"ETAPA 1 completada. Revisa {output} antes de subir a Panoptic.")
 
     def _run_download(self) -> None:
         self._run_in_thread("e1_download", self._download_fn)
@@ -712,20 +845,24 @@ class ConciliacionApp(ctk.CTk):
         raw = self._require_panoptic()
         if not raw:
             return
-        mf, mt = self._get_memo_range()
-        output = PROJECT_ROOT / "outputs" / "Etapa1"
-        self._log(f"Conciliando memos {mf}–{mt} con {raw.name}...")
-        reconcile_all_memos(raw, _MEMO_DIR_DEFAULT, output, memo_from=mf, memo_to=mt,
+        memos   = self._get_memos()
+        vendors = self._get_vendors()
+        output  = self._manual_output("Etapa1")
+        self._log(
+            f"Conciliando memos {sorted(memos) if memos else 'todos'} con {raw.name}"
+            + (f" · {len(vendors)} proveedores" if vendors else "") + "..."
+        )
+        reconcile_all_memos(raw, _MEMO_DIR_DEFAULT, output, memos=memos, vendors=vendors,
                             cancel_event=self._cancel_event)
-        self._log("Conciliación completada.")
+        self._log(f"Conciliación completada. Salida: {output}")
 
     def _run_consolidate(self) -> None:
         self._run_in_thread("e1_consolidate", self._consolidate_fn)
 
     def _consolidate_fn(self) -> None:
         from .conciliation.processing import consolidate_results
-        output = PROJECT_ROOT / "outputs" / "Etapa1"
-        self._log("Consolidando resultados...")
+        output = self._manual_output("Etapa1")
+        self._log(f"Consolidando resultados desde {output}...")
         consolidate_results(output)
         self._log("Consolidado generado.")
 
@@ -749,9 +886,14 @@ class ConciliacionApp(ctk.CTk):
 
     def _etapa2_all_fn(self) -> None:
         from .conciliation.estado_cuenta import run_etapa2
-        mf, mt   = self._get_memo_range()
+        memos    = self._get_memos()
+        vendors  = self._get_vendors()
+        folio    = self._get_ec_file()
+        if self._manual_var.get() and folio is None:
+            self._log("Modo manual: selecciona el Archivo de Estado de Cuenta (📂 en el panel).")
+            return
         settings = self._load_settings()
-        output   = PROJECT_ROOT / "outputs" / "Etapa2"
+        output   = self._manual_output("Etapa2")
         self._log("ETAPA 2 — Descargando Panoptic y cruzando con EC...")
         self._set_status("e2_cross", "running")
 
@@ -760,14 +902,13 @@ class ConciliacionApp(ctk.CTk):
 
         results = run_etapa2(
             folios_dir=_FOLIOS_DIR_DEFAULT, output_dir=output,
-            memo_from=mf, memo_to=mt,
             panoptic_settings=settings, view_name=_VIEW_NAME_DEFAULT,
-            print_fn=_pf,
+            print_fn=_pf, memos=memos, vendors=vendors, folio_file=folio,
         )
         ok  = sum(1 for r in results if r.ok)
         err = sum(1 for r in results if not r.ok)
         self._set_status("e2_cross", "ok" if err == 0 else "error")
-        self._log(f"ETAPA 2 completada — {ok} OK | {err} errores. Revisa outputs/Etapa2/")
+        self._log(f"ETAPA 2 completada — {ok} OK | {err} errores. Salida: {output}")
 
     def _run_cross_ec(self) -> None:
         self._run_in_thread("e2_cross", self._cross_ec_fn)
@@ -777,16 +918,24 @@ class ConciliacionApp(ctk.CTk):
         raw = self._require_panoptic()
         if not raw:
             return
-        mf, mt = self._get_memo_range()
-        output = PROJECT_ROOT / "outputs" / "Etapa2"
-        self._log(f"Cruzando EC contra {raw.name} (memos {mf}–{mt})...")
+        memos   = self._get_memos()
+        vendors = self._get_vendors()
+        folio   = self._get_ec_file()
+        if self._manual_var.get() and folio is None:
+            self._log("Modo manual: selecciona el Archivo de Estado de Cuenta (📂 en el panel).")
+            return
+        output  = self._manual_output("Etapa2")
+        self._log(
+            f"Cruzando EC contra {raw.name} (memos {sorted(memos) if memos else 'todos'})"
+            + (f" · {len(vendors)} proveedores" if vendors else "") + "..."
+        )
         results = cross_all_estados_cuenta(
             raw, _FOLIOS_DIR_DEFAULT, output,
-            memo_from=mf, memo_to=mt, print_fn=self._log,
+            print_fn=self._log, memos=memos, vendors=vendors, folio_file=folio,
         )
         ok  = sum(1 for r in results if r.ok)
         err = sum(1 for r in results if not r.ok)
-        self._log(f"Cruce completado — {ok} OK | {err} errores.")
+        self._log(f"Cruce completado — {ok} OK | {err} errores. Salida: {output}")
 
     def _run_upload_posting(self) -> None:
         file = self._pick_xlsx_file("Seleccionar etapa2_M*_PostingDate.xlsx")
@@ -1005,6 +1154,56 @@ class ConciliacionApp(ctk.CTk):
             print_fn=self._log,
         )
         self._log("Actualización de Status completada.")
+
+    # ── Etapa 3 — Nivel de Servicio Ene-Ago ───────────────────────────────────
+
+    def _run_etapa3_all(self) -> None:
+        self._run_in_thread("e3_all", self._etapa3_fn, False)
+
+    def _run_etapa3_capa1(self) -> None:
+        self._run_in_thread("e3_capa1", self._etapa3_fn, True)
+
+    def _etapa3_fn(self, solo_capa1: bool) -> None:
+        from .conciliation.nivel_servicio import (
+            run_nivel_servicio_from_file, _DEFAULT_BLOCKS_DIR, _DEFAULT_BITACORA,
+        )
+        raw = self._require_panoptic()
+        if not raw:
+            return
+        output = PROJECT_ROOT / "outputs" / "Etapa3"
+        tag = "Solo Capa 1" if solo_capa1 else "completa"
+        self._log(f"ETAPA 3 ({tag}) — Nivel de Servicio Ene-Ago...")
+        res = run_nivel_servicio_from_file(
+            raw, _DEFAULT_BLOCKS_DIR, _DEFAULT_BITACORA, output,
+            solo_capa1=solo_capa1, print_fn=self._log,
+        )
+        self._log(f"ETAPA 3 completada. Reporte: {res.output_path}")
+
+    # ── Etapa 4 — Nivel de Servicio Sep-Dic ───────────────────────────────────
+
+    def _run_etapa4_all(self) -> None:
+        self._run_in_thread("e4_all", self._etapa4_fn, False)
+
+    def _run_etapa4_capa1(self) -> None:
+        self._run_in_thread("e4_capa1", self._etapa4_fn, True)
+
+    def _etapa4_fn(self, solo_capa1: bool) -> None:
+        from .conciliation.nivel_servicio import (
+            run_nivel_servicio_septdic_from_file, _DEFAULT_BLOCKS_DIR,
+            _DEFAULT_BITACORA_SEPTDIC, _DEFAULT_PROVIDER_BLOCKS,
+        )
+        raw = self._require_panoptic()
+        if not raw:
+            return
+        output = PROJECT_ROOT / "outputs" / "Etapa4"
+        tag = "Solo Capa 1" if solo_capa1 else "completa"
+        self._log(f"ETAPA 4 ({tag}) — Nivel de Servicio Sep-Dic...")
+        res = run_nivel_servicio_septdic_from_file(
+            raw, _DEFAULT_BLOCKS_DIR, _DEFAULT_BITACORA_SEPTDIC, output,
+            provider_blocks_path=_DEFAULT_PROVIDER_BLOCKS,
+            solo_capa1=solo_capa1, print_fn=self._log,
+        )
+        self._log(f"ETAPA 4 completada. Reporte: {res.output_path}")
 
 
 # ---------------------------------------------------------------------------

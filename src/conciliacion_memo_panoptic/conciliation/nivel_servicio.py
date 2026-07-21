@@ -208,6 +208,19 @@ def filter_ec_ns_ene_ago(df_ec: pd.DataFrame, print_fn=print) -> pd.DataFrame:
     return out
 
 
+def filter_ec_ns_septdic(df_ec: pd.DataFrame, print_fn=print) -> pd.DataFrame:
+    """Filtra al periodo Sep-Dic 2025: Document Date >= 19-jun-2026 (inverso de Ene-Ago)."""
+    if df_ec.empty:
+        return df_ec
+    before = len(df_ec)
+    out = df_ec[df_ec["_date"] >= _NS_CUTOFF].copy()
+    print_fn(
+        f"    Corte de fecha >= {_NS_CUTOFF.date()}: {before} -> {len(out)} filas "
+        f"(excluidas Ene-Ago: {before - len(out)})"
+    )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Neto EC por proveedor
 # ---------------------------------------------------------------------------
@@ -266,7 +279,11 @@ def load_reembolsos_bitacora(bitacora_path: Path, print_fn=print) -> pd.DataFram
         print_fn(f"    [reembolsos] Bitácora no encontrada: {bitacora_path} — se omite cross-check.")
         return empty
 
-    df = pd.read_excel(bitacora_path, sheet_name=_REEMB_SHEET, header=_REEMB_HEADER_ROW - 1)
+    xl = pd.ExcelFile(bitacora_path)
+    if _REEMB_SHEET not in xl.sheet_names:
+        print_fn(f"    [reembolsos] hoja '{_REEMB_SHEET}' no existe en esta bitácora — se omite cross-check.")
+        return empty
+    df = pd.read_excel(xl, sheet_name=_REEMB_SHEET, header=_REEMB_HEADER_ROW - 1)
     if _REEMB_VENDOR not in df.columns or _REEMB_TOTAL not in df.columns:
         print_fn(f"    [reembolsos] Columnas {_REEMB_VENDOR!r}/{_REEMB_TOTAL!r} no encontradas.")
         return empty
@@ -287,6 +304,24 @@ def load_reembolsos_bitacora(bitacora_path: Path, print_fn=print) -> pd.DataFram
     agg = agg[agg["Reembolso Bitacora"].abs() > _AMOUNT_TOLERANCE]
     print_fn(f"    [reembolsos] proveedores con reembolso en bitácora: {len(agg)}")
     return agg
+
+
+def load_provider_blocks(path: Path | None, print_fn=print) -> dict:
+    """Lee el archivo 'Proveedores por bloque' → dict {vendor_number: 'Bloque N'}.
+
+    Cada columna del archivo es un bloque y sus valores son números de proveedor.
+    Sirve para etiquetar cada proveedor con su bloque en la salida. Devuelve {} si no hay archivo.
+    """
+    if path is None or not Path(path).exists():
+        return {}
+    df = pd.read_excel(path, sheet_name=0)
+    mapping: dict = {}
+    for col in df.columns:
+        label = str(col).strip()
+        for v in _normalize_vendor(df[col].dropna().astype(str)):
+            mapping.setdefault(v, label)  # si un proveedor aparece en 2 bloques, gana el primero
+    print_fn(f"    [bloques] proveedores mapeados a bloque: {len(mapping)}")
+    return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +400,77 @@ def load_bitacora_montos(bitacora_path: Path | None, print_fn=print) -> pd.DataF
         {"Bita Nombre": "first", **{c: "sum" for c in _num_cols}}
     )
     print_fn(f"    [bitacora] proveedores: {len(out)}")
+    return out
+
+
+# Bitácora Sep-Dic ("resto 2025"): estructura DISTINTA a Ene-Ago.
+# Hoja 'Bitacora Cargos NS resto 2025', header fila 4, sin columna "Final".
+# Reembolso = Soportado (no procede): X (antes) / AA (con imptos). Final = Pen − Soportado.
+_BITA_RESTO_HEADER = 3  # header en la fila 4 (0-based = 3)
+
+
+def load_bitacora_montos_resto(bitacora_path: Path | None, print_fn=print) -> pd.DataFrame:
+    """Lee la bitácora del formato 'resto 2025' (Sep-Dic) y devuelve las MISMAS columnas
+    estandarizadas que `load_bitacora_montos`, para reutilizar `compare_bitacora_panoptic`.
+
+    Mapeo (confirmado con Oscar): Penalización con imptos = 'Pen con Imptos';
+    Penalización sin imptos = 'Pen sin Imptos'; Reembolso = 'Soportado (no procede)'
+    (antes / con imptos); Final = Penalización − Soportado.
+    """
+    if bitacora_path is None or not Path(bitacora_path).exists():
+        print_fn(f"    [bitacora resto] no encontrada: {bitacora_path}")
+        return pd.DataFrame(columns=_BITA_OUT_COLS)
+
+    xl = pd.ExcelFile(bitacora_path)
+    sheet = (
+        next((s for s in xl.sheet_names if "bitacora" in s.lower() and "resto" in s.lower()), None)
+        or next((s for s in xl.sheet_names if s.lower().startswith("bitacora")), None)
+    )
+    if sheet is None:
+        print_fn(f"    [bitacora resto] no se encontró hoja 'Bitacora...' en {bitacora_path}")
+        return pd.DataFrame(columns=_BITA_OUT_COLS)
+
+    df = pd.read_excel(xl, sheet_name=sheet, header=_BITA_RESTO_HEADER)
+    cols = list(df.columns)
+    c_prov = _find_col(cols, "Proveedor")
+    c_pen_sin = _find_col(cols, "Pen sin Imptos")
+    c_pen_con = _find_col(cols, "Pen con Imptos")
+    c_sop_antes = _find_col(cols, "Soportado", "antes")
+    c_sop_con = _find_col(cols, "Soportado con Imptos")
+
+    faltan = [n for n, c in [
+        ("Proveedor", c_prov), ("Pen sin Imptos", c_pen_sin), ("Pen con Imptos", c_pen_con),
+        ("Soportado antes", c_sop_antes), ("Soportado con Imptos", c_sop_con),
+    ] if c is None]
+    if faltan:
+        print_fn(f"    [bitacora resto] columnas no encontradas: {faltan} — se omite validación.")
+        return pd.DataFrame(columns=_BITA_OUT_COLS)
+
+    df = df[df[c_prov].notna()].copy()
+    # Nombre del proveedor = la columna que sigue a 'Proveedor' (aquí se llama 'Prov').
+    prov_pos = cols.index(c_prov)
+    c_name = cols[prov_pos + 1] if prov_pos + 1 < len(cols) else None
+
+    def num(c):
+        return pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    pen_sin, pen_con = num(c_pen_sin), num(c_pen_con)
+    sop_antes, sop_con = num(c_sop_antes), num(c_sop_con)
+
+    out = pd.DataFrame({
+        _PAN_VENDOR: _normalize_vendor(df[c_prov]),
+        "Bita Nombre": (df[c_name].fillna("").astype(str).str.strip() if c_name is not None else ""),
+        "Bita Penalizacion c/imp":     pen_con,
+        "Bita Final antes imptos":     pen_sin - sop_antes,
+        "Bita Final con imptos":       pen_con - sop_con,
+        "Bita Reembolso antes imptos": sop_antes,
+        "Bita Reembolso con imptos":   sop_con,
+    })
+    _num_cols = [c for c in out.columns if c not in (_PAN_VENDOR, "Bita Nombre")]
+    out = out.groupby(_PAN_VENDOR, as_index=False).agg(
+        {"Bita Nombre": "first", **{c: "sum" for c in _num_cols}}
+    )
+    print_fn(f"    [bitacora resto] proveedores: {len(out)}")
     return out
 
 
@@ -480,8 +586,23 @@ def cross_nivel_servicio(
     output_dir: Path,
     solo_capa1: bool = False,
     print_fn=print,
+    *,
+    posting_ref: str = _NS_POSTING_REF,
+    bitacora_loader=load_bitacora_montos,
+    ec_period_filter=filter_ec_ns_ene_ago,
+    out_subdir: str = "NS",
+    out_prefix: str = "etapa3_NS",
+    provider_block_map: dict | None = None,
+    report_subtitles: dict | None = None,
 ) -> NivelServicioResult:
     """Cruza el EC consolidado de NS contra Panoptic y genera reporte + plantillas.
+
+    Motor genérico usado por Etapa 3 (defaults) y Etapa 4 (parámetros):
+    - posting_ref: valor de Posting reference a filtrar en Panoptic.
+    - bitacora_loader: función que lee la bitácora → columnas estandarizadas.
+    - ec_period_filter: filtro de periodo del EC (Ene-Ago `<` vs Sep-Dic `>=`).
+    - out_subdir/out_prefix: carpeta y prefijo de los archivos de salida.
+    - provider_block_map: {proveedor: 'Bloque N'} para etiquetar la salida (Etapa 4).
 
     solo_capa1=True → ejecuta SOLO la validación primaria Bitácora vs Panoptic
     (sin leer los bloques del EC, casi instantáneo) y termina.
@@ -492,15 +613,15 @@ def cross_nivel_servicio(
     if _PAN_POSTING_REF not in df_pan.columns:
         raise ValueError(f"Panoptic no tiene la columna {_PAN_POSTING_REF!r}")
 
-    ns = df_pan[df_pan[_PAN_POSTING_REF].astype(str).str.strip() == _NS_POSTING_REF].copy()
-    print_fn(f"    Panoptic {_NS_POSTING_REF}: {len(ns)} filas")
+    ns = df_pan[df_pan[_PAN_POSTING_REF].astype(str).str.strip() == posting_ref].copy()
+    print_fn(f"    Panoptic {posting_ref}: {len(ns)} filas")
     if _PAN_STATUS in ns.columns:
         ns = ns[ns[_PAN_STATUS].astype(str).str.strip() != _STATUS_EXCLUDE].copy()
     print_fn(f"    Panoptic NS no-Rejected: {len(ns)} filas ({ns[_PAN_VENDOR].nunique()} proveedores)")
 
     if ns.empty:
         raise ValueError(
-            f"No hay claims con {_PAN_POSTING_REF} (no-Rejected) en Panoptic. "
+            f"No hay claims con {posting_ref} (no-Rejected) en Panoptic. "
             f"¿El export es correcto?"
         )
 
@@ -517,17 +638,19 @@ def cross_nivel_servicio(
 
     # --- VALIDACIÓN PRIMARIA: Bitácora (auditor) vs Panoptic ---
     # La bitácora tiene los montos VALIDADOS por el auditor; Panoptic debió replicarlos.
-    bita = load_bitacora_montos(bitacora_path, print_fn=print_fn)
+    bita = bitacora_loader(bitacora_path, print_fn=print_fn)
     df_bita_pan, bita_matched = compare_bitacora_panoptic(ns, bita, print_fn=print_fn)
+    if provider_block_map and not df_bita_pan.empty:
+        df_bita_pan.insert(1, "Bloque", df_bita_pan[_PAN_VENDOR].astype(str).map(provider_block_map))
     n_bita_no = (len(df_bita_pan) - len(bita_matched)) if not df_bita_pan.empty else 0
     n_pan_ns_total = int(ns[_PAN_VENDOR].nunique())
 
     # --- Modo SOLO CAPA 1: escribe solo la validación Bitácora vs Panoptic y termina ---
     # No lee los bloques del EC, así que es casi instantáneo.
     if solo_capa1:
-        ns_dir = output_dir / "NS"
+        ns_dir = output_dir / out_subdir
         ns_dir.mkdir(parents=True, exist_ok=True)
-        output_path = ns_dir / "etapa3_NS_capa1.xlsx"
+        output_path = ns_dir / f"{out_prefix}_capa1.xlsx"
         resumen = pd.DataFrame([
             {"Métrica": "Proveedores Panoptic NS (no-Rejected)", "Valor": n_pan_ns_total},
             {"Métrica": "Capa 1 — Bitácora vs Panoptic: COINCIDEN", "Valor": len(bita_matched)},
@@ -537,7 +660,7 @@ def cross_nivel_servicio(
         with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
             write_sheet(writer, resumen, "Resumen NS")
             write_sheet(writer, df_bita_pan, "Bitacora vs Panoptic")
-            style_workbook(writer.book)
+            style_workbook(writer.book, subtitles=report_subtitles)
         print_fn(f"    Reporte Capa 1: {output_path}")
         return NivelServicioResult(
             output_path=output_path,
@@ -558,7 +681,7 @@ def cross_nivel_servicio(
 
     # --- Consolidar y filtrar EC ---
     df_ec = consolidate_ec_blocks(blocks_dir, print_fn=print_fn)
-    df_ec = filter_ec_ns_ene_ago(df_ec, print_fn=print_fn)
+    df_ec = ec_period_filter(df_ec, print_fn=print_fn)
     if df_ec.empty:
         raise ValueError("El EC consolidado quedó vacío tras filtros NS / fecha.")
 
@@ -635,6 +758,9 @@ def cross_nivel_servicio(
     df_cruce_full = ns[ns[_PAN_VENDOR].astype(str).isin(matched)].copy()
     cruce_cols = [c for c in _CRUCE_COLS if c in df_cruce_full.columns]
     df_cruce_view = df_cruce_full[cruce_cols].copy()
+    if provider_block_map and not df_cruce_view.empty:
+        _pos = df_cruce_view.columns.get_loc(_PAN_VENDOR) + 1
+        df_cruce_view.insert(_pos, "Bloque", df_cruce_view[_PAN_VENDOR].astype(str).map(provider_block_map))
 
     # --- Reembolsos cross-check ---
     df_reemb = load_reembolsos_bitacora(bitacora_path, print_fn=print_fn)
@@ -673,9 +799,9 @@ def cross_nivel_servicio(
     ])
 
     # --- Escribir salida ---
-    ns_dir = output_dir / "NS"
+    ns_dir = output_dir / out_subdir
     ns_dir.mkdir(parents=True, exist_ok=True)
-    output_path = ns_dir / "etapa3_NS.xlsx"
+    output_path = ns_dir / f"{out_prefix}.xlsx"
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         write_sheet(writer, resumen, "Resumen NS")
@@ -684,7 +810,7 @@ def cross_nivel_servicio(
         write_sheet(writer, df_mismatch, "Sin Coincidencia")
         write_sheet(writer, pan_sin_ec, "Panoptic Sin EC")
         write_sheet(writer, df_reemb, "Reembolsos")
-        style_workbook(writer.book)
+        style_workbook(writer.book, subtitles=report_subtitles)
 
     print_fn(f"    Reporte: {output_path}")
 
@@ -694,12 +820,12 @@ def cross_nivel_servicio(
     recov_idx   = _rows_updated_in(filled_by_row, _RECOVERY_COLS)
     if posting_idx:
         posting_path = generate_posting_date_template(
-            ns.loc[posting_idx], ns_dir / "etapa3_NS_PostingDate.xlsx"
+            ns.loc[posting_idx], ns_dir / f"{out_prefix}_PostingDate.xlsx"
         )
         print_fn(f"    Plantilla PostingDate: {len(posting_idx)} claims -> {posting_path}")
     if recov_idx:
         recoveries_path = generate_recoveries_template(
-            ns.loc[recov_idx], ns_dir / "etapa3_NS_Recoveries.xlsx"
+            ns.loc[recov_idx], ns_dir / f"{out_prefix}_Recoveries.xlsx"
         )
         print_fn(f"    Plantilla Recoveries:  {len(recov_idx)} claims -> {recoveries_path}")
     if not posting_idx and not recov_idx:
@@ -743,4 +869,56 @@ def run_nivel_servicio_from_file(
     return cross_nivel_servicio(
         df_pan, blocks_dir, bitacora_path, output_dir,
         solo_capa1=solo_capa1, print_fn=print_fn,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Etapa 4 — Nivel de Servicio Sep-Dic 2025 (clon parametrizado de Etapa 3)
+# ---------------------------------------------------------------------------
+
+_SEPTDIC_POSTING_REF = "NS-SeptDic 2025"
+_DEFAULT_BITACORA_SEPTDIC = Path(
+    r"X:\Soriana\00 - AUDITORIA 2020 - 2024\BLOQUES ESTADO CUENTA\BITACORAS\BITACORA NS resto 2025.xlsx"
+)
+_DEFAULT_PROVIDER_BLOCKS = Path(
+    r"X:\Soriana\00 - AUDITORIA 2020 - 2024\00 - Auditores\Oscar\Proyectos Python"
+    r"\Conciliacion_Memo_Panoptic\Proveedores_bloque_Sep-Dic 25.xlsx"
+)
+
+
+def run_nivel_servicio_septdic_from_file(
+    raw_panoptic_path: Path,
+    blocks_dir: Path,
+    bitacora_path: Path | None,
+    output_dir: Path,
+    provider_blocks_path: Path | None = None,
+    solo_capa1: bool = False,
+    print_fn=print,
+) -> NivelServicioResult:
+    """Etapa 4 (Sep-Dic 2025): reutiliza el motor de Etapa 3 con parámetros distintos.
+
+    Posting reference `NS-SeptDic 2025`, bitácora formato 'resto', EC filtrado a
+    Document Date >= 19-jun-2026, y etiqueta cada proveedor con su bloque (1-6).
+    """
+    print_fn(f"  Cargando Panoptic: {raw_panoptic_path}")
+    df_pan = _load_panoptic(raw_panoptic_path)
+    block_map = load_provider_blocks(provider_blocks_path, print_fn=print_fn)
+    subtitles = {
+        "Resumen NS":           "Etapa 4 — Nivel de Servicio (NS-SeptDic 2025) — Resumen",
+        "Bitacora vs Panoptic": "Etapa 4 — Bitácora (auditor) vs Panoptic  [validación primaria]",
+        "Cruce Exitoso":        "Etapa 4 — Cruce Exitoso (EC vs Panoptic)",
+        "Sin Coincidencia":     "Etapa 4 — Sin Coincidencia (EC vs Panoptic)",
+        "Panoptic Sin EC":      "Etapa 4 — Proveedores Panoptic sin Estado de Cuenta",
+        "Reembolsos":           "Etapa 4 — Reembolsos (cross-check)",
+    }
+    return cross_nivel_servicio(
+        df_pan, blocks_dir, bitacora_path, output_dir,
+        solo_capa1=solo_capa1, print_fn=print_fn,
+        posting_ref=_SEPTDIC_POSTING_REF,
+        bitacora_loader=load_bitacora_montos_resto,
+        ec_period_filter=filter_ec_ns_septdic,
+        out_subdir="NS_SeptDic",
+        out_prefix="etapa4_NS_SeptDic",
+        provider_block_map=block_map,
+        report_subtitles=subtitles,
     )

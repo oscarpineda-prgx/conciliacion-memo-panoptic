@@ -58,13 +58,18 @@ def write_sheet(writer, df, sheet_name: str) -> None:
     df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=HEADER_ROWS)
 
 
-def style_workbook(wb, logo_path: Path | None = None) -> None:
-    """Aplica logo, título y estilo de columnas a todas las hojas del workbook."""
+def style_workbook(wb, logo_path: Path | None = None, subtitles: dict | None = None) -> None:
+    """Aplica logo, título y estilo de columnas a todas las hojas del workbook.
+
+    subtitles: mapa opcional {hoja: subtítulo} que toma precedencia sobre SHEET_SUBTITLES
+    (para reetiquetar por etapa sin afectar a otras). Si es None, usa los defaults.
+    """
     resolved_logo = logo_path or DEFAULT_LOGO
     logo_exists = resolved_logo.exists()
+    subs = {**SHEET_SUBTITLES, **(subtitles or {})}
 
     for ws in wb.worksheets:
-        subtitle = SHEET_SUBTITLES.get(ws.title, ws.title)
+        subtitle = subs.get(ws.title, ws.title)
         _style_sheet(ws, subtitle, resolved_logo if logo_exists else None)
 
 

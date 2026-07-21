@@ -53,6 +53,31 @@ def _normalize_vendor(series: pd.Series) -> pd.Series:
     return series.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
 
 
+def parse_memo_numbers(text: str | None) -> set[int]:
+    """Parsea memos soportando rangos y listas:
+    '40-56' → {40..56}; '48, 49, 50' → {48,49,50}; mezcla '40-45, 48' también.
+    Ignora tokens no numéricos.
+    """
+    out: set[int] = set()
+    for tok in re.split(r"[,\n;]+", text or ""):
+        tok = tok.strip()
+        if not tok:
+            continue
+        m = re.match(r"^(\d+)\s*-\s*(\d+)$", tok)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            out.update(range(min(a, b), max(a, b) + 1))
+        else:
+            out.update(int(n) for n in re.findall(r"\d+", tok))
+    return out
+
+
+def parse_vendor_numbers(text: str | None) -> set[str]:
+    """Parsea Vendor numbers (líneas / comas / espacios) → set normalizado (mismo formato que Panoptic)."""
+    toks = [t for t in re.split(r"[\s,;]+", (text or "").strip()) if t]
+    return set(_normalize_vendor(pd.Series(toks))) if toks else set()
+
+
 def _normalize_posting_ref(series: pd.Series) -> pd.Series:
     """Normaliza Posting reference number a formato canónico de 3 dígitos.
 
@@ -828,6 +853,7 @@ def _reconcile_memo_from_df(
     claims_accumulator: list[pd.DataFrame] | None = None,
     memo_vendor_sets: dict[str, set[str]] | None = None,
     df_duplicados_x_memo: pd.DataFrame | None = None,
+    vendors: set[str] | None = None,
 ) -> Path:
     """Ejecuta los 4 pasos de conciliación para un memo.
 
@@ -841,6 +867,12 @@ def _reconcile_memo_from_df(
 
     df_memo_pf = _load_memo_prov_fase(memo_path)
     df_memo_ca = _load_memo_concepto_ano(memo_path)
+
+    # Modo manual: restringir a los proveedores seleccionados (si se indicaron).
+    if vendors:
+        df_pan = df_pan[df_pan["Vendor number"].astype(str).isin(vendors)].copy()
+        df_memo_pf = df_memo_pf[df_memo_pf["Num Proveedor"].astype(str).isin(vendors)].copy()
+        df_memo_ca = df_memo_ca[df_memo_ca["Num Proveedor"].astype(str).isin(vendors)].copy()
 
     # P1 — Asignar memo a claims sin Posting reference (modifica df_pan in-place)
     df_p1_actualizados, df_p1_diferencias, df_claims = _paso1_asignar_memo(
@@ -1003,15 +1035,27 @@ def reconcile_all_memos(
     memo_from: int | None = None,
     memo_to: int | None = None,
     cancel_event=None,
+    *,
+    memos: set[int] | None = None,
+    vendors: set[str] | None = None,
 ) -> list[MemoResult]:
-    """Carga Panoptic una sola vez y concilia contra todos los memos encontrados en memo_dir."""
+    """Carga Panoptic una sola vez y concilia contra los memos de memo_dir.
+
+    `memos` (lista específica, tiene prioridad sobre el rango) y `vendors` (filtro de
+    proveedores) son opcionales — si no se pasan, el comportamiento es el de siempre.
+    """
     df_pan = _load_panoptic(raw_panoptic_path)
 
     entries = _discover_memo_entries(memo_dir)
     if not entries:
         raise FileNotFoundError(f"No se encontraron memos en {memo_dir}")
 
-    if memo_from is not None or memo_to is not None:
+    if memos:
+        def _in_memos(memo_id: str) -> bool:
+            m = re.search(r"\d+", memo_id)
+            return bool(m) and int(m.group()) in memos
+        entries = [(mid, p) for mid, p in entries if _in_memos(mid)]
+    elif memo_from is not None or memo_to is not None:
         def _in_range(memo_id: str) -> bool:
             num_match = re.search(r"\d+", memo_id)
             if not num_match:
@@ -1065,6 +1109,7 @@ def reconcile_all_memos(
                 claims_accumulator=claims_accumulator,
                 memo_vendor_sets=memo_vendor_sets,
                 df_duplicados_x_memo=df_duplicados_x_memo,
+                vendors=vendors,
             )
         except Exception as exc:
             result.error = str(exc)

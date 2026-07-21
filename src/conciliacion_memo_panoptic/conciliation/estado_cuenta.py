@@ -81,22 +81,31 @@ def _is_no_fill(fill) -> bool:
 
 
 def _no_fill_row_indices(path: Path, col_name: str) -> set[int]:
-    """Índices pandas (0-based) de filas donde col_name no tiene relleno de color."""
+    """Índices pandas (0-based) de filas donde col_name no tiene relleno de color.
+
+    read_only=True: openpyxl transmite las filas en vez de construir un objeto por celda.
+    Los EC grandes llegan al tope de Excel (~1.05M filas × 19 cols = 20M celdas) y en modo
+    normal el pico de memoria se iba a varios GB -> MemoryError. Verificado que el acceso
+    a .fill da el MISMO resultado en ambos modos (BLOQUE 5: 48180 filas, 12x menos memoria).
+    """
     from openpyxl import load_workbook
 
-    wb = load_workbook(path, data_only=True)
-    ws = wb.active
+    wb = load_workbook(path, data_only=True, read_only=True)
+    try:
+        ws = wb.active
 
-    header = next(ws.iter_rows(min_row=1, max_row=1, values_only=False), [])
-    col_idx = next((c.column for c in header if c.value == col_name), None)
-    if col_idx is None:
-        raise ValueError(f"Columna '{col_name}' no encontrada en {path.name}")
+        header = next(ws.iter_rows(min_row=1, max_row=1, values_only=False), [])
+        col_idx = next((c.column for c in header if c.value == col_name), None)
+        if col_idx is None:
+            raise ValueError(f"Columna '{col_name}' no encontrada en {path.name}")
 
-    return {
-        pandas_idx
-        for pandas_idx, row in enumerate(ws.iter_rows(min_row=2))
-        if _is_no_fill(row[col_idx - 1].fill)
-    }
+        return {
+            pandas_idx
+            for pandas_idx, row in enumerate(ws.iter_rows(min_row=2))
+            if _is_no_fill(row[col_idx - 1].fill)
+        }
+    finally:
+        wb.close()  # read_only deja el archivo abierto si no se cierra explícitamente
 
 
 # ---------------------------------------------------------------------------
@@ -113,38 +122,38 @@ def _memo_num_pattern(memo_id: str) -> str:
     return rf"(?<!\d)0*{int(m.group())}(?!\d)" if m else re.escape(memo_id)
 
 
-def load_estado_cuenta(folio_path: Path, memo_id: str, print_fn=print) -> pd.DataFrame:
-    """Carga el Estado de Cuenta aplicando los 3 filtros requeridos:
+def load_estado_cuenta_base(folio_path: Path, print_fn=print) -> pd.DataFrame:
+    """Carga el EC aplicando solo los filtros que NO dependen del memo:
 
     1. Filas sin relleno de color en Document Number (filtro de color).
     2. Columna Text contiene la palabra 'MEMO'.
-    3. Columna Text contiene el número de este memo (048, 48, etc.).
+
+    Esta es la parte CARA (lee el XLSX completo dos veces: openpyxl para el color y
+    pandas para los datos), y su resultado es el mismo para cualquier memo. El df que
+    devuelve es chico (miles de filas), así que conviene cargarlo una vez y reutilizarlo
+    para todos los memos con `filter_ec_memo` en vez de releer el archivo por cada uno.
     """
     no_fill_idx = _no_fill_row_indices(folio_path, _EC_DOC_NUMBER)
     print_fn(f"      [filtro color]  filas sin relleno: {len(no_fill_idx)}")
 
     df = pd.read_excel(folio_path)
     print_fn(f"      [excel total]   filas totales: {len(df)}  |  columnas: {list(df.columns)}")
-    df = df.iloc[sorted(no_fill_idx)].copy().reset_index(drop=True)
+
+    # openpyxl recorre las filas que el archivo declara en <dimension>, que puede incluir
+    # filas VACÍAS al final (Excel las escribe como <row/> sin celdas) mientras que pandas
+    # las recorta. Visto en 'BLOQUE 2 .xlsx': openpyxl 1048567 vs pandas 1048453. Esos
+    # índices sobrantes no son datos, así que se descartan en vez de reventar con IndexError.
+    n_extra = sum(1 for i in no_fill_idx if i >= len(df))
+    if n_extra:
+        print_fn(f"      [ajuste]        {n_extra} filas vacías al final del archivo — ignoradas")
+    df = df.iloc[[i for i in sorted(no_fill_idx) if i < len(df)]].copy().reset_index(drop=True)
 
     if _EC_TEXT in df.columns:
         text = df[_EC_TEXT].fillna("").astype(str).str.upper()
-        df_memo_word = df[text.str.contains("MEMO", regex=False)]
-        print_fn(f"      [filtro MEMO]   filas con 'MEMO': {len(df_memo_word)}")
-        if not df_memo_word.empty:
-            pattern = _memo_num_pattern(memo_id)
-            df_memo_num = df_memo_word[
-                text.loc[df_memo_word.index].str.contains(pattern, regex=True)
-            ]
-            print_fn(f"      [filtro número] filas con '{memo_id}' (patrón {pattern!r}): {len(df_memo_num)}")
-            if df_memo_word.empty or df_memo_num.empty:
-                sample = text.loc[df_memo_word.index].head(5).tolist() if not df_memo_word.empty else text.head(5).tolist()
-                print_fn(f"      [muestra Text]  {sample}")
-            df = df_memo_num.reset_index(drop=True)
-        else:
-            sample = text.head(5).tolist()
-            print_fn(f"      [muestra Text]  {sample}")
-            df = df_memo_word.reset_index(drop=True)
+        df = df[text.str.contains("MEMO", regex=False)].reset_index(drop=True)
+        print_fn(f"      [filtro MEMO]   filas con 'MEMO': {len(df)}")
+        if df.empty:
+            print_fn(f"      [muestra Text]  {text.head(5).tolist()}")
     else:
         print_fn(f"      ADVERTENCIA: columna '{_EC_TEXT}' no encontrada. Columnas disponibles: {list(df.columns)}")
 
@@ -152,6 +161,35 @@ def load_estado_cuenta(folio_path: Path, memo_id: str, print_fn=print) -> pd.Dat
         df[_EC_ACCOUNT] = _normalize_vendor(df[_EC_ACCOUNT])
 
     return df
+
+
+def filter_ec_memo(df_base: pd.DataFrame, memo_id: str, print_fn=print) -> pd.DataFrame:
+    """Filtra la base de un EC (ya sin color y solo filas 'MEMO') al memo indicado.
+
+    Tercer filtro: la columna Text contiene el número de este memo (048, 48, etc.).
+    Opera en memoria, así que es instantáneo comparado con `load_estado_cuenta_base`.
+    """
+    if df_base.empty or _EC_TEXT not in df_base.columns:
+        return df_base.copy()
+
+    text = df_base[_EC_TEXT].fillna("").astype(str).str.upper()
+    pattern = _memo_num_pattern(memo_id)
+    out = df_base[text.str.contains(pattern, regex=True)].reset_index(drop=True)
+    print_fn(f"      [filtro número] filas con '{memo_id}' (patrón {pattern!r}): {len(out)}")
+    if out.empty:
+        print_fn(f"      [muestra Text]  {text.head(5).tolist()}")
+    return out
+
+
+def load_estado_cuenta(folio_path: Path, memo_id: str, print_fn=print) -> pd.DataFrame:
+    """Carga el Estado de Cuenta de un memo aplicando los 3 filtros requeridos:
+
+    1. Filas sin relleno de color en Document Number (filtro de color).
+    2. Columna Text contiene la palabra 'MEMO'.
+    3. Columna Text contiene el número de este memo (048, 48, etc.).
+    """
+    df_base = load_estado_cuenta_base(folio_path, print_fn=print_fn)
+    return filter_ec_memo(df_base, memo_id, print_fn=print_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -581,25 +619,93 @@ def generate_recoveries_template(df_cruce: pd.DataFrame, output_path: Path) -> P
 # Cruce por memo
 # ---------------------------------------------------------------------------
 
+def _as_folio_list(folio_path) -> list[Path]:
+    """Normaliza a lista de Paths. Acepta un Path único o una lista/tupla de Paths."""
+    if isinstance(folio_path, (list, tuple)):
+        return [Path(p) for p in folio_path]
+    return [Path(folio_path)]
+
+
+def _folio_display(folio_path) -> str:
+    """Nombre(s) de archivo para logs, sea un Path o varios."""
+    return " + ".join(p.name for p in _as_folio_list(folio_path))
+
+
+def _combine_ec_frames(ec_frames: list[pd.DataFrame], memo_id: str, print_fn=print) -> pd.DataFrame:
+    """Combina las filas de un memo provenientes de varios archivos EC, sin duplicados exactos.
+
+    Un memo puede repartirse entre varios archivos, así que las filas DISTINTAS se conservan
+    todas. Pero si el mismo archivo se selecciona dos veces, sus filas se contarían DOBLE y
+    los montos del cruce saldrían inflados sin que nada falle (se ve como "0 coincidencias,
+    todo sin coincidencia"). Se comparan TODAS las columnas y no solo Document Number: dos
+    filas legítimamente distintas nunca son idénticas en todo, así que no se pierde nada real.
+
+    Los duplicados dentro de un MISMO archivo se respetan (pueden ser cargos reales repetidos);
+    solo se descarta la repetición que aporta OTRO archivo.
+    """
+    if len(ec_frames) == 1:
+        return ec_frames[0]
+
+    marked: list[pd.DataFrame] = []
+    for df in ec_frames:
+        d = df.copy()
+        # _seq = n-ésima ocurrencia de una fila idéntica dentro de SU archivo, para que dos
+        # filas iguales legítimas del mismo archivo no se cancelen entre sí al deduplicar.
+        d["_seq"] = 0 if d.empty else d.groupby(list(df.columns), dropna=False).cumcount()
+        marked.append(d)
+
+    combined = pd.concat(marked, ignore_index=True)
+    cols = [c for c in combined.columns if c != "_seq"]
+    before = len(combined)
+    combined = combined.drop_duplicates(subset=cols + ["_seq"], keep="first").reset_index(drop=True)
+
+    n_drop = before - len(combined)
+    if n_drop:
+        print_fn(
+            f"    *** ADVERTENCIA: {n_drop} filas de {memo_id} eran duplicados EXACTOS entre "
+            f"archivos EC y se DESCARTARON (quedan {len(combined)}). ¿Seleccionaste el mismo "
+            f"archivo dos veces? Revisa la lista de archivos EC. ***"
+        )
+    return combined.drop(columns="_seq")
+
+
 def cross_estado_cuenta_memo(
     df_pan_full: pd.DataFrame,
-    folio_path: Path,
+    folio_path: Path | list[Path],
     memo_id: str,
     output_dir: Path,
     print_fn=print,
+    vendors: set[str] | None = None,
+    ec_bases: list[tuple[Path, pd.DataFrame]] | None = None,
 ) -> Path:
     """Cruza el Estado de Cuenta de un memo contra Panoptic.
 
     Para cada proveedor en el EC cuyo monto coincide (±1 peso) con la suma
     de sus registros en Panoptic, escribe las columnas de compensación.
 
+    `ec_bases`: bases de EC ya cargadas [(path, df)] — evita releer los XLSX por cada
+    memo cuando el mismo archivo sirve a varios (ver `cross_all_estados_cuenta`).
+    Si es None, se cargan aquí (comportamiento de siempre).
+
     Genera outputs/etapa2_M0XX.xlsx con 3 hojas:
       - Cruce Exitoso     : filas Panoptic enriquecidas con datos EC.
       - Sin Coincidencia  : proveedores EC sin match en Panoptic (monto distinto o ausente).
       - Panoptic Sin Folio: proveedores Panoptic del memo sin fila en EC.
     """
-    df_ec = load_estado_cuenta(folio_path, memo_id, print_fn=print_fn)
-    print_fn(f"    EC cargado:            {len(df_ec)} filas  (archivo: {folio_path.name})")
+    if ec_bases is None:
+        ec_bases = [
+            (_fp, load_estado_cuenta_base(_fp, print_fn=print_fn))
+            for _fp in _as_folio_list(folio_path)
+        ]
+    folio_paths = [_fp for _fp, _ in ec_bases]
+    ec_frames: list[pd.DataFrame] = []
+    for _fp, _base in ec_bases:
+        df_part = filter_ec_memo(_base, memo_id, print_fn=print_fn)
+        print_fn(f"    EC cargado:            {len(df_part)} filas  (archivo: {_fp.name})")
+        ec_frames.append(df_part)
+    df_ec = _combine_ec_frames(ec_frames, memo_id, print_fn=print_fn)
+    if len(folio_paths) > 1:
+        print_fn(f"    EC combinado:          {len(df_ec)} filas de {len(folio_paths)} archivos")
 
     if df_ec.empty:
         print_fn(f"    ADVERTENCIA: El EC no tiene filas para {memo_id}. Verifica filtros de color/texto.")
@@ -611,6 +717,15 @@ def cross_estado_cuenta_memo(
         df_pan[_PAN_POSTING_REF] == memo_id
     ].copy()
     print_fn(f"    Panoptic con {memo_id}:     {len(df_pan_memo)} filas")
+
+    # Modo manual: restringir el cruce a los proveedores seleccionados (si se indicaron).
+    if vendors:
+        df_ec = df_ec[df_ec[_EC_ACCOUNT].astype(str).isin(vendors)].copy()
+        df_pan_memo = df_pan_memo[df_pan_memo[_PAN_VENDOR].astype(str).isin(vendors)].copy()
+        print_fn(
+            f"    [filtro proveedores] {len(vendors)} seleccionados -> "
+            f"EC {len(df_ec)} filas | Panoptic {len(df_pan_memo)} filas"
+        )
 
     if df_pan_memo.empty:
         print_fn(
@@ -720,7 +835,7 @@ def cross_estado_cuenta_memo(
 @dataclass
 class CrossResult:
     memo_id: str
-    folio_path: Path
+    folio_path: Path | list[Path]
     output_path: Path | None = None
     error: str | None = None
 
@@ -736,35 +851,89 @@ def cross_all_estados_cuenta(
     memo_from: int | None = None,
     memo_to: int | None = None,
     print_fn=print,
+    *,
+    memos: set[int] | None = None,
+    vendors: set[str] | None = None,
+    folio_file: Path | list[Path] | None = None,
 ) -> list[CrossResult]:
-    """Carga Panoptic una vez y cruza contra todos los MEMO_*.xlsx de folios_dir."""
+    """Carga Panoptic una vez y cruza contra los Estados de Cuenta.
+
+    Modo normal (default): escanea `folios_dir` por MEMO_*.xlsx y filtra por rango.
+    Modo manual (opcional, no afecta el default):
+      - `memos`:      lista de memos específicos a procesar (tiene prioridad sobre el rango).
+      - `vendors`:    filtra el cruce a esos proveedores (Vendor number normalizado).
+      - `folio_file`: uno o varios archivos EC con varios memos; se filtra por el memo en `Text`
+                      (requiere `memos` para saber cuáles extraer). Cada archivo se lee UNA vez
+                      (`load_estado_cuenta_base`) y luego cada memo solo filtra en memoria.
+                      Si son varios, las filas de todos se combinan por memo (sin deduplicar).
+    """
     df_pan = _load_panoptic(raw_panoptic_path)
     print_fn(f"  Panoptic total filas: {len(df_pan)}")
 
-    entries = discover_folio_entries(folios_dir)
-    if not entries:
-        raise FileNotFoundError(f"No se encontraron archivos MEMO_*.xlsx en {folios_dir}")
+    # Bases de EC precargadas: solo aplica al modo archivo(s) único(s), donde los mismos
+    # archivos sirven para todos los memos. En modo normal cada memo tiene su propio
+    # MEMO_*.xlsx, así que no hay nada que reutilizar.
+    ec_bases: list[tuple[Path, pd.DataFrame]] | None = None
 
-    if memo_from is not None or memo_to is not None:
-        entries = [
-            (mid, p) for mid, p in entries
-            if _memo_in_range(mid, memo_from, memo_to)
-        ]
+    if folio_file is not None:
+        folio_paths = _as_folio_list(folio_file)
+        for _fp in folio_paths:
+            if not _fp.exists():
+                raise FileNotFoundError(f"Archivo de Estado de Cuenta no encontrado: {_fp}")
+        if not memos:
+            raise ValueError("Con archivo(s) EC hay que indicar la lista de memos.")
+        entries = [(f"M{int(n):03d}", folio_paths) for n in sorted(memos)]
+        print_fn(
+            f"  Archivos EC ({len(folio_paths)}): "
+            f"{', '.join(p.name for p in folio_paths)}  ·  memos: {sorted(memos)}"
+        )
+        # Cada archivo se lee UNA sola vez (es lo caro: XLSX de cientos de miles de filas);
+        # después cada memo solo filtra en memoria.
+        print_fn(f"  Precargando {len(folio_paths)} archivo(s) EC (una lectura por archivo)...")
+        ec_bases = []
+        for _fp in folio_paths:
+            print_fn(f"    [{_fp.name}]")
+            ec_bases.append((_fp, load_estado_cuenta_base(_fp, print_fn=print_fn)))
+        _total_base = sum(len(b) for _, b in ec_bases)
+        print_fn(f"  EC precargado: {_total_base} filas 'MEMO' de {len(folio_paths)} archivo(s)")
+    else:
+        entries = discover_folio_entries(folios_dir)
+        if not entries:
+            raise FileNotFoundError(f"No se encontraron archivos MEMO_*.xlsx en {folios_dir}")
+        if memos:
+            entries = [(mid, p) for mid, p in entries if _memo_num(mid) in memos]
+        elif memo_from is not None or memo_to is not None:
+            entries = [
+                (mid, p) for mid, p in entries
+                if _memo_in_range(mid, memo_from, memo_to)
+            ]
+
+    if vendors:
+        print_fn(f"  Filtro de proveedores: {len(vendors)} seleccionados")
 
     results: list[CrossResult] = []
     for memo_id, folio_path in entries:
-        print_fn(f"\n  [{memo_id}] {folio_path.name}")
+        print_fn(f"\n  [{memo_id}] {_folio_display(folio_path)}")
         result = CrossResult(memo_id=memo_id, folio_path=folio_path)
         try:
             result.output_path = cross_estado_cuenta_memo(
-                df_pan, folio_path, memo_id, output_dir, print_fn=print_fn
+                df_pan, folio_path, memo_id, output_dir, print_fn=print_fn, vendors=vendors,
+                ec_bases=ec_bases,
             )
         except Exception as exc:
-            result.error = str(exc)
-            print_fn(f"    ERROR: {exc}")
+            # repr() y no str(): hay excepciones sin mensaje (p. ej. MemoryError) que
+            # con str() dejaban el log en "ERROR: " a secas.
+            result.error = repr(exc)
+            print_fn(f"    ERROR: {exc!r}")
         results.append(result)
 
     return results
+
+
+def _memo_num(memo_id: str) -> int | None:
+    """Número entero de un memo id ('M048' -> 48)."""
+    m = re.search(r"\d+", memo_id)
+    return int(m.group()) if m else None
 
 
 def _memo_in_range(memo_id: str, memo_from: int | None, memo_to: int | None) -> bool:
@@ -788,6 +957,10 @@ def run_etapa2(
     panoptic_settings=None,
     view_name: str = "MONICA_3",
     print_fn=print,
+    *,
+    memos: set[int] | None = None,
+    vendors: set[str] | None = None,
+    folio_file: Path | list[Path] | None = None,
 ) -> list[CrossResult]:
     """Descarga Panoptic y cruza contra todos los Folios Compensatorios (Etapa 2 completa)."""
     from ..panoptic.downloader import download_xlsx
@@ -806,6 +979,7 @@ def run_etapa2(
         raw_path, folios_dir, output_dir,
         memo_from=memo_from, memo_to=memo_to,
         print_fn=print_fn,
+        memos=memos, vendors=vendors, folio_file=folio_file,
     )
 
     ok     = [r for r in results if r.ok]

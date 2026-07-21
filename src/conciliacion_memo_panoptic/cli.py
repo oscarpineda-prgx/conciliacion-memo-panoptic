@@ -105,6 +105,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--memo-to", type=int, default=None,
         help="Número de memo final del rango a procesar (ej. 56).",
     )
+    reconcile_all.add_argument(
+        "--memos", type=str, default=None,
+        help="Lista/rango de memos (ej. '48,49,50' o '40-56'). Tiene prioridad sobre --memo-from/--memo-to.",
+    )
+    reconcile_all.add_argument(
+        "--vendors", type=str, default=None,
+        help="Vendor numbers a filtrar (coma/espacio/línea). Ejecución manual.",
+    )
 
     upload = subparsers.add_parser(
         "upload-claim-updates",
@@ -215,6 +223,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--memo-to", type=int, default=None,
         help="Número de memo final del rango a procesar (ej. 56).",
     )
+    cross_all.add_argument(
+        "--memos", type=str, default=None,
+        help="Lista/rango de memos (ej. '48,49,50' o '40-56'). Tiene prioridad sobre --memo-from/--memo-to.",
+    )
+    cross_all.add_argument(
+        "--vendors", type=str, default=None,
+        help="Vendor numbers a filtrar (coma/espacio/línea). Ejecución manual.",
+    )
+    cross_all.add_argument(
+        "--folio-file", type=Path, default=None, nargs="+",
+        help="Uno o varios archivos EC con varios memos (en vez de la carpeta de folios). Requiere --memos.",
+    )
 
     cross_ns = subparsers.add_parser(
         "cross-nivel-servicio",
@@ -250,6 +270,47 @@ def build_parser() -> argparse.ArgumentParser:
             "Ejecuta SOLO la Capa 1 (Bitácora vs Panoptic). No lee los bloques del EC, "
             "así que es casi instantáneo. Genera etapa3_NS_capa1.xlsx."
         ),
+    )
+
+    cross_sd = subparsers.add_parser(
+        "cross-nivel-servicio-septdic",
+        help=(
+            "Etapa 4 — Nivel de Servicio Sep-Dic 2025. Igual que Etapa 3 pero con Posting "
+            "reference 'NS-SeptDic 2025', bitácora 'resto' y EC filtrado a >= 19-jun-2026."
+        ),
+    )
+    cross_sd.add_argument(
+        "--raw-panoptic", type=Path, required=True,
+        help="Ruta al XLSX de Panoptic actualizado (vista MONICA_3).",
+    )
+    cross_sd.add_argument(
+        "--blocks-dir", type=Path,
+        default=Path(r"X:\Soriana\00 - AUDITORIA 2020 - 2024\BLOQUES ESTADO CUENTA"),
+        help="Carpeta con los BLOQUE*.xlsx del Estado de Cuenta.",
+    )
+    cross_sd.add_argument(
+        "--bitacora", type=Path,
+        default=Path(
+            r"X:\Soriana\00 - AUDITORIA 2020 - 2024\BLOQUES ESTADO CUENTA\BITACORAS"
+            r"\BITACORA NS resto 2025.xlsx"
+        ),
+        help="Bitácora Sep-Dic (formato 'resto').",
+    )
+    cross_sd.add_argument(
+        "--provider-blocks", type=Path,
+        default=Path(
+            r"X:\Soriana\00 - AUDITORIA 2020 - 2024\00 - Auditores\Oscar\Proyectos Python"
+            r"\Conciliacion_Memo_Panoptic\Proveedores_bloque_Sep-Dic 25.xlsx"
+        ),
+        help="Archivo de proveedores por bloque (etiqueta cada proveedor con su bloque 1-6).",
+    )
+    cross_sd.add_argument(
+        "--output-dir", type=Path, default=Path("outputs/Etapa4"),
+        help="Carpeta de salida.",
+    )
+    cross_sd.add_argument(
+        "--solo-capa1", action="store_true",
+        help="Ejecuta SOLO la Capa 1 (Bitácora vs Panoptic), sin leer los bloques del EC.",
     )
 
     run_etapa2 = subparsers.add_parser(
@@ -455,15 +516,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "reconcile-all":
-        from .conciliation.processing import reconcile_all_memos
+        from .conciliation.processing import (
+            reconcile_all_memos, parse_memo_numbers, parse_vendor_numbers,
+        )
+
+        memos = parse_memo_numbers(args.memos) or None
+        vendors = parse_vendor_numbers(args.vendors) or None
 
         print(f"Cargando Panoptic: {args.raw_panoptic}")
         print(f"Buscando MEMOs en: {args.memo_dir}")
+        if memos:
+            print(f"Memos (lista): {sorted(memos)}")
+        if vendors:
+            print(f"Proveedores filtrados: {sorted(vendors)}")
         print()
 
         results = reconcile_all_memos(
             args.raw_panoptic, args.memo_dir, args.output_dir,
             memo_from=args.memo_from, memo_to=args.memo_to,
+            memos=memos, vendors=vendors,
         )
 
         ok = [r for r in results if r.ok]
@@ -544,15 +615,32 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "cross-all-estados":
         from .conciliation.estado_cuenta import cross_all_estados_cuenta
+        from .conciliation.processing import parse_memo_numbers, parse_vendor_numbers
+
+        memos = parse_memo_numbers(args.memos) or None
+        vendors = parse_vendor_numbers(args.vendors) or None
+        folio_file = args.folio_file
+
+        if folio_file is not None and not memos:
+            print("ERROR: --folio-file requiere --memos (lista de memos dentro del archivo).")
+            return 2
 
         print(f"Cargando Panoptic: {args.raw_panoptic}")
-        print(f"Buscando folios en: {args.folios_dir}")
+        if folio_file is not None:
+            print(f"Archivo(s) EC ({len(folio_file)}): {', '.join(str(p) for p in folio_file)}")
+        else:
+            print(f"Buscando folios en: {args.folios_dir}")
+        if memos:
+            print(f"Memos (lista): {sorted(memos)}")
+        if vendors:
+            print(f"Proveedores filtrados: {sorted(vendors)}")
         print()
 
         results = cross_all_estados_cuenta(
             args.raw_panoptic, args.folios_dir, args.output_dir,
             memo_from=args.memo_from, memo_to=args.memo_to,
             print_fn=print,
+            memos=memos, vendors=vendors, folio_file=folio_file,
         )
 
         ok     = [r for r in results if r.ok]
@@ -581,6 +669,39 @@ def main(argv: list[str] | None = None) -> int:
             res = run_nivel_servicio_from_file(
                 args.raw_panoptic, args.blocks_dir, args.bitacora, args.output_dir,
                 solo_capa1=args.solo_capa1,
+            )
+        except Exception as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        print()
+        print(f"  [Capa 1 - Bitacora vs Panoptic] coinciden:    {res.bita_coincide}")
+        print(f"  [Capa 1 - Bitacora vs Panoptic] NO coinciden: {res.bita_no_coincide}")
+        if not args.solo_capa1:
+            print(f"  [Capa 2 - EC vs Panoptic] coincidentes:       {res.matched_vendors}")
+            print(f"  [Capa 2 - EC vs Panoptic] descuadre/sin match:{res.mismatched_vendors}")
+            print(f"  Panoptic NS sin EC:                           {res.panoptic_sin_ec}")
+            print(f"  Claims para carga (actualizados):             {res.claims_para_carga}")
+        print(f"  Reporte: {res.output_path}")
+        if res.posting_date_path:
+            print(f"  Plantilla PostingDate: {res.posting_date_path}")
+            print(f"  Plantilla Recoveries:  {res.recoveries_path}")
+            print("  NOTA: las plantillas SOLO se generaron en disco — NO se subieron a Panoptic.")
+        return 0 if res.ok else 1
+
+    if args.command == "cross-nivel-servicio-septdic":
+        from .conciliation.nivel_servicio import run_nivel_servicio_septdic_from_file
+
+        print(f"Cargando Panoptic: {args.raw_panoptic}")
+        if args.solo_capa1:
+            print("Modo: SOLO Capa 1 (Bitácora vs Panoptic) — no se leen los bloques del EC.")
+        else:
+            print(f"Bloques EC: {args.blocks_dir}")
+        print()
+        try:
+            res = run_nivel_servicio_septdic_from_file(
+                args.raw_panoptic, args.blocks_dir, args.bitacora, args.output_dir,
+                provider_blocks_path=args.provider_blocks, solo_capa1=args.solo_capa1,
             )
         except Exception as exc:
             print(f"Error: {exc}")
