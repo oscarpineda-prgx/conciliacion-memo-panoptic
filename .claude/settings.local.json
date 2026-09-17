@@ -180,7 +180,14 @@
       "Bash(grep -ow 325670 C:/Users/opined01/AppData/Local/Temp/1/claude/x--Soriana-00---AUDITORIA-2020---2024-00---Auditores-Oscar-Proyectos-Python-Conciliacion-Memo-Panoptic/0c63fdbe-2f6e-477e-b7f4-f8038ab9c214/scratchpad/vendors.txt)",
       "Bash(echo \"SI ESTA\")",
       "Bash(echo \"NO ESTA\")",
-      "Bash(echo \"=== en que hoja del M045 aparece? ===\")"
+      "Bash(echo \"=== en que hoja del M045 aparece? ===\")",
+      "Bash(git --no-pager diff --stat src/conciliacion_memo_panoptic/conciliation/estado_cuenta.py)",
+      "Bash(git --no-pager diff -U0 src/conciliacion_memo_panoptic/conciliation/estado_cuenta.py)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git --no-pager diff --numstat HEAD -- src/conciliacion_memo_panoptic/conciliation/estado_cuenta.py)",
+      "Bash(git --no-pager diff HEAD --stat -- src/conciliacion_memo_panoptic/conciliation/estado_cuenta.py)",
+      "Bash(git --no-pager diff --cached --stat -- src/conciliacion_memo_panoptic/conciliation/estado_cuenta.py)",
+      "Bash(git --no-pager diff --ignore-cr-at-eol HEAD -- src/conciliacion_memo_panoptic/conciliation/estado_cuenta.py)"
     ]
   }
 }

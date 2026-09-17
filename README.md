@@ -313,3 +313,17 @@ Parametros en `config/panoptic.local.json`:
 | `locator_probe_timeout_ms` | Tiempo por cada selector alternativo |
 | `post_click_wait_ms` | Pausa corta despues de cada click |
 | `download_timeout_ms` | Timeout para esperar la descarga del XLSX |
+
+## Archivos de referencia y muestras
+
+- `data/referencias/` — insumos que el CLI toma por defecto: la bitácora de
+  aclaraciones NS y el archivo de proveedores por bloque (Sep-Dic 25). Antes
+  estaban en la raíz y el código los buscaba por ruta absoluta de `X:`; ahora se
+  resuelven con `PROJECT_ROOT`, así que el proyecto se puede mover.
+- `data/samples/` — memos de ejemplo (`Memo_030_varios.xlsx`, `MEMO-030 (1).xlsx`)
+  para probar `reconcile` sin tocar los archivos de trabajo.
+- `docs/imagenes/` — `image.png` y `logo.svg`, que estaban sueltos en la raíz.
+
+Las rutas a `X:\Soriana\...\BLOQUES ESTADO CUENTA` y `FOLIOS COMPENSATORIOS`
+que quedan en el CLI son **carpetas compartidas de la auditoría**, fuera del
+proyecto: ahí la ruta absoluta es la correcta.

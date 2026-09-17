@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .paths import PROJECT_ROOT
 from .settings import load_panoptic_settings
 
 
@@ -254,10 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cross_ns.add_argument(
         "--bitacora", type=Path,
-        default=Path(
-            r"X:\Soriana\00 - AUDITORIA 2020 - 2024\00 - Auditores\Oscar\Proyectos Python"
-            r"\Conciliacion_Memo_Panoptic\BITACORA_ACLARACIONES_NS 2025 (2).xlsx"
-        ),
+        default=PROJECT_ROOT / "data" / "referencias" / "BITACORA_ACLARACIONES_NS 2025 (2).xlsx",
         help="Archivo de bitácora NS (hoja Reembolsos) para el cross-check.",
     )
     cross_ns.add_argument(
@@ -298,10 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cross_sd.add_argument(
         "--provider-blocks", type=Path,
-        default=Path(
-            r"X:\Soriana\00 - AUDITORIA 2020 - 2024\00 - Auditores\Oscar\Proyectos Python"
-            r"\Conciliacion_Memo_Panoptic\Proveedores_bloque_Sep-Dic 25.xlsx"
-        ),
+        default=PROJECT_ROOT / "data" / "referencias" / "Proveedores_bloque_Sep-Dic 25.xlsx",
         help="Archivo de proveedores por bloque (etiqueta cada proveedor con su bloque 1-6).",
     )
     cross_sd.add_argument(

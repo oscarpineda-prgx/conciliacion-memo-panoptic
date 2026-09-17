@@ -40,6 +40,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ..paths import PROJECT_ROOT
 from .estado_cuenta import (
     _EC_ACCOUNT,
     _EC_AMOUNT,
@@ -849,10 +850,7 @@ def cross_nivel_servicio(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_BLOCKS_DIR = Path(r"X:\Soriana\00 - AUDITORIA 2020 - 2024\BLOQUES ESTADO CUENTA")
-_DEFAULT_BITACORA = Path(
-    r"X:\Soriana\00 - AUDITORIA 2020 - 2024\00 - Auditores\Oscar\Proyectos Python"
-    r"\Conciliacion_Memo_Panoptic\BITACORA_ACLARACIONES_NS 2025 (2).xlsx"
-)
+_DEFAULT_BITACORA = PROJECT_ROOT / "data" / "referencias" / "BITACORA_ACLARACIONES_NS 2025 (2).xlsx"
 
 
 def run_nivel_servicio_from_file(
@@ -880,10 +878,7 @@ _SEPTDIC_POSTING_REF = "NS-SeptDic 2025"
 _DEFAULT_BITACORA_SEPTDIC = Path(
     r"X:\Soriana\00 - AUDITORIA 2020 - 2024\BLOQUES ESTADO CUENTA\BITACORAS\BITACORA NS resto 2025.xlsx"
 )
-_DEFAULT_PROVIDER_BLOCKS = Path(
-    r"X:\Soriana\00 - AUDITORIA 2020 - 2024\00 - Auditores\Oscar\Proyectos Python"
-    r"\Conciliacion_Memo_Panoptic\Proveedores_bloque_Sep-Dic 25.xlsx"
-)
+_DEFAULT_PROVIDER_BLOCKS = PROJECT_ROOT / "data" / "referencias" / "Proveedores_bloque_Sep-Dic 25.xlsx"
 
 
 def run_nivel_servicio_septdic_from_file(
